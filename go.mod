@@ -2,9 +2,9 @@ module github.com/codastre/cli
 
 go 1.22
 
+require github.com/spf13/cobra v1.8.1
+
 require (
-	github.com/99designs/keyring v1.2.2
-	github.com/fsnotify/fsnotify v1.7.0
-	github.com/go-git/go-git/v5 v5.12.0
-	github.com/spf13/cobra v1.8.1
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/spf13/pflag v1.0.5 // indirect
 )
