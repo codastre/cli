@@ -2,6 +2,7 @@
 // It reads newline-delimited JSON-RPC from stdin, forwards each message to the
 // server's MCP HTTP endpoint with the auth header, and writes the response to stdout.
 // QUERY responses have their path_tokens unmasked and snippets hydrated from disk.
+// GRAPH responses have their src/dst path_tokens and evidence file_path_tokens unmasked.
 package mcpshim
 
 import (
@@ -38,7 +39,7 @@ func Run(cfg Config, in io.Reader, out io.Writer) error {
 		if err != nil {
 			resp = errorEnvelope(line, err)
 		} else {
-			resp = enrichQueryResponse(cfg, resp)
+			resp = enrichResponse(cfg, resp)
 		}
 		fmt.Fprintf(out, "%s\n", resp)
 	}
@@ -67,6 +68,26 @@ func forwardMessage(cfg Config, body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("server error %d: %s", resp.StatusCode, data)
 	}
 	return data, nil
+}
+
+// enrichResponse dispatches to enrichQueryResponse or enrichGraphResponse based
+// on which top-level key is present in the JSON payload. Returns data unchanged
+// if neither "results" nor "edges" is found.
+func enrichResponse(cfg Config, data []byte) []byte {
+	if cfg.UnmaskPath == nil {
+		return data
+	}
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(data, &env); err != nil {
+		return data
+	}
+	if _, ok := env["results"]; ok {
+		return enrichQueryResponse(cfg, data)
+	}
+	if _, ok := env["edges"]; ok {
+		return enrichGraphResponse(cfg, data)
+	}
+	return data
 }
 
 // enrichQueryResponse unmasks path_tokens and hydrates snippets in QUERY responses.
@@ -133,6 +154,97 @@ func enrichQueryResponse(cfg Config, data []byte) []byte {
 	env["results"] = enriched
 	out, _ := json.Marshal(env)
 	return out
+}
+
+// enrichGraphResponse unmasks src/dst path_tokens and evidence file_path_tokens
+// in GRAPH responses. For each edge:
+//   - src["path_token"] -> src["real_path"] (if UnmaskPath returns ok)
+//   - dst["path_token"] -> dst["real_path"] (if UnmaskPath returns ok)
+//   - evidence["file_path_token"] -> evidence["real_file_path"] (if present and ok)
+//
+// Uses maskKeyRev=0 since GRAPH responses carry no top-level mask_key_rev field.
+func enrichGraphResponse(cfg Config, data []byte) []byte {
+	if cfg.UnmaskPath == nil {
+		return data
+	}
+
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(data, &env); err != nil {
+		return data
+	}
+	edgesRaw, ok := env["edges"]
+	if !ok {
+		return data
+	}
+
+	// Each element is a graph_edge_result: {edge, src, dst, confidence, resolution, evidence?}
+	var edges []map[string]json.RawMessage
+	if err := json.Unmarshal(edgesRaw, &edges); err != nil {
+		return data
+	}
+
+	const maskKeyRev = 0
+
+	for i, e := range edges {
+		// Unmask src.path_token -> src.real_path
+		if srcRaw, ok := e["src"]; ok {
+			var src map[string]json.RawMessage
+			if err := json.Unmarshal(srcRaw, &src); err == nil {
+				if tok, ok := unmarshalString(src["path_token"]); ok {
+					if realPath, ok := cfg.UnmaskPath(tok, maskKeyRev); ok {
+						src["real_path"], _ = json.Marshal(realPath)
+						e["src"], _ = json.Marshal(src)
+					}
+				}
+			}
+		}
+
+		// Unmask dst.path_token -> dst.real_path
+		if dstRaw, ok := e["dst"]; ok {
+			var dst map[string]json.RawMessage
+			if err := json.Unmarshal(dstRaw, &dst); err == nil {
+				if tok, ok := unmarshalString(dst["path_token"]); ok {
+					if realPath, ok := cfg.UnmaskPath(tok, maskKeyRev); ok {
+						dst["real_path"], _ = json.Marshal(realPath)
+						e["dst"], _ = json.Marshal(dst)
+					}
+				}
+			}
+		}
+
+		// Unmask evidence.file_path_token -> evidence.real_file_path (optional field)
+		if evRaw, ok := e["evidence"]; ok {
+			var ev map[string]json.RawMessage
+			if err := json.Unmarshal(evRaw, &ev); err == nil {
+				if tok, ok := unmarshalString(ev["file_path_token"]); ok {
+					if realPath, ok := cfg.UnmaskPath(tok, maskKeyRev); ok {
+						ev["real_file_path"], _ = json.Marshal(realPath)
+						e["evidence"], _ = json.Marshal(ev)
+					}
+				}
+			}
+		}
+
+		edges[i] = e
+	}
+
+	enriched, _ := json.Marshal(edges)
+	env["edges"] = enriched
+	out, _ := json.Marshal(env)
+	return out
+}
+
+// unmarshalString extracts a Go string from a json.RawMessage.
+// Returns ("", false) if raw is nil or not a JSON string.
+func unmarshalString(raw json.RawMessage) (string, bool) {
+	if raw == nil {
+		return "", false
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", false
+	}
+	return s, true
 }
 
 // hydrateSnippet reads [lineStart, lineEnd] from the file and checks staleness.
