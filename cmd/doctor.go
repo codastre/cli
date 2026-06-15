@@ -143,7 +143,7 @@ func runDoctor(cmd *cobra.Command, _ []string) {
 }
 
 func checkServer(serverURL string) (bool, string) {
-	resp, err := http.Get(serverURL + "/v1/healthz")
+	resp, err := http.Get(serverURL + "/healthz")
 	if err != nil {
 		return false, err.Error()
 	}

@@ -42,7 +42,7 @@ type tokenResp struct {
 func runLogin(cmd *cobra.Command, args []string) error {
 	serverURL := strings.TrimRight(loginServerURL, "/")
 
-	resp, err := http.Post(serverURL+"/v1/auth/device", "application/json", http.NoBody)
+	resp, err := http.Post(serverURL+"/v1/auth/device", "application/json", strings.NewReader("{}"))
 	if err != nil {
 		return fmt.Errorf("device code request: %w", err)
 	}
@@ -101,8 +101,8 @@ func runLogin(cmd *cobra.Command, args []string) error {
 
 // pollToken polls the token endpoint once. Returns (apiKey, done, extraDelay, err).
 func pollToken(serverURL, deviceCode string) (string, bool, time.Duration, error) {
-	payload := strings.NewReader(fmt.Sprintf(`{"device_code":%q}`, deviceCode))
-	resp, err := http.Post(serverURL+"/v1/auth/token", "application/json", payload)
+	u := serverURL + "/v1/auth/device/token?device_code=" + url.QueryEscape(deviceCode)
+	resp, err := http.Get(u)
 	if err != nil {
 		return "", false, 0, fmt.Errorf("poll token: %w", err)
 	}
@@ -113,16 +113,23 @@ func pollToken(serverURL, deviceCode string) (string, bool, time.Duration, error
 		return "", false, 0, fmt.Errorf("decode token response: %w", err)
 	}
 
-	switch tr.Error {
-	case "authorization_pending":
-		return "", false, 0, nil
-	case "slow_down":
-		return "", false, 5 * time.Second, nil
-	case "":
-		return tr.APIKey, true, 0, nil
-	default:
-		return "", false, 0, fmt.Errorf("token error: %s", tr.Error)
+	// RFC 8628: error field is present on 4xx responses.
+	// Guard on status code first so an empty "error" field never appears done.
+	if resp.StatusCode >= 400 {
+		switch tr.Error {
+		case "authorization_pending", "":
+			return "", false, 0, nil
+		case "slow_down":
+			return "", false, 5 * time.Second, nil
+		default:
+			return "", false, 0, fmt.Errorf("token error: %s", tr.Error)
+		}
 	}
+
+	if tr.APIKey == "" {
+		return "", false, 0, fmt.Errorf("token response missing api_key")
+	}
+	return tr.APIKey, true, 0, nil
 }
 
 // extractHost returns the host (and port if non-standard) from a URL string.

@@ -64,9 +64,21 @@ func (s *Store) GetAPIKey(serverHost string) (string, error) {
 // SetAPIKey stores the API key for a server host.
 func (s *Store) SetAPIKey(serverHost, apiKey string) error {
 	return s.ring.Set(keyring.Item{
-		Key:  serverHost,
-		Data: []byte(apiKey),
+		Key:         serverHost,
+		Data:        []byte(apiKey),
+		Label:       fmt.Sprintf("codastre API key (%s)", serverHost),
+		Description: "codastre API key",
 	})
+}
+
+// DeleteAPIKey removes the stored API key for a server host.
+// Returns nil if no key was stored (idempotent logout).
+func (s *Store) DeleteAPIKey(serverHost string) error {
+	err := s.ring.Remove(serverHost)
+	if err == keyring.ErrKeyNotFound {
+		return nil
+	}
+	return err
 }
 
 // GetMaskKey retrieves the repo masking key for a given revision.
@@ -81,9 +93,12 @@ func (s *Store) GetMaskKey(serverHost, repoID string, rev int) ([]byte, error) {
 
 // SetMaskKey stores a repo masking key.
 func (s *Store) SetMaskKey(serverHost, repoID string, rev int, key []byte) error {
+	id := maskKeyID(serverHost, repoID, rev)
 	return s.ring.Set(keyring.Item{
-		Key:  maskKeyID(serverHost, repoID, rev),
-		Data: []byte(hex.EncodeToString(key)),
+		Key:         id,
+		Data:        []byte(hex.EncodeToString(key)),
+		Label:       fmt.Sprintf("codastre mask key (%s)", id),
+		Description: "codastre masking key",
 	})
 }
 
