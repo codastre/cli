@@ -24,8 +24,9 @@ type Store struct {
 // keychain is unavailable. isFallback=true when the file backend is active.
 func Open() (*Store, bool, error) {
 	ring, err := keyring.Open(keyring.Config{
-		ServiceName:              serviceName,
-		KeychainTrustApplication: true,
+		ServiceName:                    serviceName,
+		KeychainTrustApplication:       true,
+		KeychainAccessibleWhenUnlocked: true,
 	})
 	if err == nil {
 		return &Store{ring: ring}, false, nil
@@ -62,7 +63,14 @@ func (s *Store) GetAPIKey(serverHost string) (string, error) {
 }
 
 // SetAPIKey stores the API key for a server host.
+// Deletes any pre-existing entry first so the item is always created fresh
+// rather than updated; the update path in the keyring library skips re-applying
+// accessibility and trust flags, so recreation is the only way to guarantee
+// they take effect.
 func (s *Store) SetAPIKey(serverHost, apiKey string) error {
+	if err := s.ring.Remove(serverHost); err != nil && err != keyring.ErrKeyNotFound {
+		_ = err // best-effort; proceed and let Set report any failure
+	}
 	return s.ring.Set(keyring.Item{
 		Key:         serverHost,
 		Data:        []byte(apiKey),

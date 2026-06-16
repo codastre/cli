@@ -37,7 +37,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	apiKey, err := store.GetAPIKey(host)
 	if err != nil {
-		return fmt.Errorf("no API key for %s — run `codastre login` first: %w", host, err)
+		if v := os.Getenv("CODASTRE_API_KEY"); v != "" {
+			apiKey = v
+		} else {
+			return fmt.Errorf("no API key for %s — run `codastre login` first: %w", host, err)
+		}
 	}
 
 	repoRoot, _ := findGitRoot(".")
