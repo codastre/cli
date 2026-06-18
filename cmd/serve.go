@@ -15,7 +15,7 @@ var serveCmd = &cobra.Command{
 	RunE:  runServe,
 }
 
-var serveNoWatch  bool
+var serveNoWatch bool
 var serveServerURL string
 
 func init() {

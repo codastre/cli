@@ -1,0 +1,164 @@
+package cmd
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/codastre/cli/internal/mcpclient"
+	"github.com/spf13/cobra"
+)
+
+var queryCmd = &cobra.Command{
+	Use:   "query <text>",
+	Short: "Hybrid semantic + lexical code search (no MCP connection required)",
+	Long: `Search indexed repositories with a single request to the codastre server.
+
+This is the CLI equivalent of the MCP QUERY tool. What it searches depends on
+the flags you pass and your current directory:
+
+  --index-id <uuid>   search one specific index
+  --repo-url <url>    search the latest ready index for that repo
+  --all               search every repo you can see, merged
+
+With no target flag:
+  • inside a git repo with an 'origin' remote → search THAT repo
+  • otherwise (no repo / no origin)           → search every repo you can see
+
+Reading the output:
+  • status "ok" with an empty result list means "searched, nothing matched" —
+    that is a valid answer, not an error (exit 0).
+  • error RETRIEVAL_UNAVAILABLE means the data plane is down; fall back to grep.
+  • error REPO_NOT_INDEXED means the repo has never been registered; register it
+    over MCP (REGISTER) first.
+  • freshness is the worst case across searched repos: fresh | syncing | degraded.
+  • each result carries repo_id; the 'repos' map (in --json) resolves it to a
+    remote_url. Paths are returned as path_token (cleartext unless the repo uses
+    HMAC masking).
+
+Auth resolves in order: --key, $CODASTRE_API_KEY, then the OS keychain / file
+fallback populated by 'codastre login'.
+
+Examples:
+  codastre query "where are masking keys rotated"          # this repo
+  codastre query "stripe webhook handler" --all            # all visible repos
+  codastre query "auth middleware" --repo-url github.com/acme/api
+  codastre query "retry policy" --index-id 1f2e... --top-k 20
+  codastre query "parse config" --language go --json       # raw envelope for agents`,
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
+	RunE:         runQuery,
+}
+
+var (
+	queryServerURL    string
+	queryKey          string
+	queryIndexID      string
+	queryRepoURL      string
+	queryAll          bool
+	queryRef          string
+	queryTopK         int
+	queryLanguage     string
+	queryPathPrefix   string
+	queryContentKinds []string
+	queryJSON         bool
+	queryFormat       string
+)
+
+func init() {
+	f := queryCmd.Flags()
+	f.StringVar(&queryServerURL, "server", defaultServerURL(), "Server URL [$CODASTRE_SERVER]")
+	f.StringVar(&queryKey, "key", "", "API key (overrides $CODASTRE_API_KEY and keychain)")
+	f.StringVar(&queryIndexID, "index-id", "", "Search a single index by id")
+	f.StringVar(&queryRepoURL, "repo-url", "", "Search a specific repo by URL")
+	f.BoolVar(&queryAll, "all", false, "Search across all visible repos")
+	f.StringVar(&queryRef, "ref", "", "Branch/ref to include its overlay (default: base only)")
+	f.IntVar(&queryTopK, "top-k", 10, "Maximum results (1-50)")
+	f.StringVar(&queryLanguage, "language", "", "Filter by language")
+	f.StringVar(&queryPathPrefix, "path-prefix", "", "Filter by path prefix")
+	f.StringSliceVar(&queryContentKinds, "content-kinds", nil, "Filter by content kinds (repeatable)")
+	f.BoolVar(&queryJSON, "json", false, "Emit the raw JSON envelope instead of human output")
+	f.StringVar(&queryFormat, "format", "human", "Output format: human | json")
+	rootCmd.AddCommand(queryCmd)
+}
+
+func runQuery(cmd *cobra.Command, args []string) error {
+	asJSON, err := wantJSON(queryJSON, queryFormat)
+	if err != nil {
+		return err
+	}
+
+	tgt, err := resolveTarget(queryIndexID, queryRepoURL, queryAll)
+	if err != nil {
+		return err
+	}
+
+	apiKey, warn, err := resolveAPIKey(queryServerURL, queryKey)
+	if err != nil {
+		return err
+	}
+	if warn != "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+warn)
+	}
+
+	toolArgs := map[string]any{"query_text": args[0], "top_k": queryTopK}
+	tgt.apply(toolArgs)
+	if queryRef != "" {
+		toolArgs["ref"] = queryRef
+	}
+	if queryLanguage != "" {
+		toolArgs["language"] = queryLanguage
+	}
+	if queryPathPrefix != "" {
+		toolArgs["path_prefix"] = queryPathPrefix
+	}
+	if len(queryContentKinds) > 0 {
+		toolArgs["content_kinds"] = queryContentKinds
+	}
+
+	// Server caps QUERY at 10s; allow margin for transport.
+	ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
+	defer cancel()
+
+	payload, err := mcpclient.Call(ctx, mcpclient.Config{ServerURL: queryServerURL, APIKey: apiKey}, "QUERY", toolArgs)
+	if err != nil {
+		return queryErrorHint(err)
+	}
+
+	if asJSON {
+		return printJSON(cmd.OutOrStdout(), payload)
+	}
+	if !asJSON {
+		fmt.Fprintf(cmd.ErrOrStderr(), "target: %s\n", tgt.describe())
+	}
+	return renderQueryHuman(cmd.OutOrStdout(), payload)
+}
+
+// queryErrorHint augments known tool errors with an actionable next step.
+func queryErrorHint(err error) error {
+	var te *mcpclient.ToolError
+	if errors.As(err, &te) {
+		switch te.Code {
+		case "REPO_NOT_INDEXED":
+			return fmt.Errorf("%w — this repo is not indexed; register it over MCP (REGISTER) first, or use --all to search other repos", te)
+		case "RETRIEVAL_UNAVAILABLE":
+			return fmt.Errorf("%w — the search backend is down; fall back to local grep", te)
+		case "INDEX_BUILDING":
+			return fmt.Errorf("%w — the index is still building; retry shortly", te)
+		}
+	}
+	return err
+}
+
+// wantJSON resolves the --json / --format flags into a single boolean.
+func wantJSON(jsonFlag bool, format string) (bool, error) {
+	switch format {
+	case "json":
+		return true, nil
+	case "human", "":
+		return jsonFlag, nil
+	default:
+		return false, fmt.Errorf("invalid --format %q: want human or json", format)
+	}
+}
