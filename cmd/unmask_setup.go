@@ -51,8 +51,8 @@ func setupUnmask(
 	}
 
 	host := extractHost(serverURL)
-	fetch := func(rev int) ([]byte, bool, error) {
-		return fetchMaskKey(serverURL, apiKey, host, info.RepoID, rev, store)
+	fetch := func(rev int, force bool) ([]byte, bool, error) {
+		return fetchMaskKey(serverURL, apiKey, host, info.RepoID, rev, force, store)
 	}
 
 	resolver := unmask.New(repoRoot, fetch)
@@ -67,20 +67,28 @@ func setupUnmask(
 // first and falling back to GET /v1/repos/{id}/masking-key. Every revision the
 // server returns is cached, so a rotation (a newly-seen rev) is fetched once and
 // then served from the keychain. ok is false when the server has no such rev.
+//
+// When force is true the keychain read is skipped and the server is queried
+// directly; the fetched keys overwrite the cache. This recovers from a rev whose
+// key changed under the same number (disable → re-enable masking reuses rev 1),
+// where the cached key would otherwise be stale forever.
 func fetchMaskKey(
 	serverURL, apiKey, host, repoID string,
 	rev int,
+	force bool,
 	store *keychain.Store,
 ) ([]byte, bool, error) {
-	if key, err := store.GetMaskKey(host, repoID, rev); err == nil && len(key) > 0 {
-		return key, true, nil
+	if !force {
+		if key, err := store.GetMaskKey(host, repoID, rev); err == nil && len(key) > 0 {
+			return key, true, nil
+		}
 	}
 	keys, err := unmask.FetchMaskingKeys(serverURL, apiKey, repoID)
 	if err != nil {
 		return nil, false, err
 	}
 	for r, k := range keys {
-		_ = store.SetMaskKey(host, repoID, r, k) // best-effort cache
+		_ = store.SetMaskKey(host, repoID, r, k) // best-effort cache (overwrites stale)
 	}
 	key, ok := keys[rev]
 	return key, ok, nil

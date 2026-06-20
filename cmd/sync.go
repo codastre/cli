@@ -208,7 +208,7 @@ func syncMaskKey(serverURL, apiKey string, info *unmask.RepoInfo) ([]byte, error
 		return nil, fmt.Errorf("open keychain: %w", err)
 	}
 	host := extractHost(serverURL)
-	key, ok, err := fetchMaskKey(serverURL, apiKey, host, info.RepoID, info.MaskKeyRev, store)
+	key, ok, err := fetchMaskKey(serverURL, apiKey, host, info.RepoID, info.MaskKeyRev, false, store)
 	if err != nil {
 		return nil, err
 	}

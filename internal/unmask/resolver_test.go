@@ -41,7 +41,7 @@ var testKeyRev2 = []byte("fedcba9876543210fedcba9876543210")
 
 func TestUnmaskExactRev(t *testing.T) {
 	root := newGitRepo(t, "src/auth/handler.go", "README.md")
-	r := New(root, func(rev int) ([]byte, bool, error) {
+	r := New(root, func(rev int, _ bool) ([]byte, bool, error) {
 		return testKeyRev1, true, nil
 	})
 	if ok, err := r.LoadRev(1); err != nil || !ok {
@@ -57,7 +57,7 @@ func TestUnmaskExactRev(t *testing.T) {
 
 func TestUnmaskUnknownTokenReturnsFalse(t *testing.T) {
 	root := newGitRepo(t, "main.go")
-	r := New(root, func(rev int) ([]byte, bool, error) {
+	r := New(root, func(rev int, _ bool) ([]byte, bool, error) {
 		return testKeyRev1, true, nil
 	})
 	if _, err := r.LoadRev(1); err != nil {
@@ -73,7 +73,7 @@ func TestUnmaskUnknownTokenReturnsFalse(t *testing.T) {
 func TestUnmaskLazyFetchOnRotation(t *testing.T) {
 	root := newGitRepo(t, "app.go")
 	var fetched []int
-	r := New(root, func(rev int) ([]byte, bool, error) {
+	r := New(root, func(rev int, _ bool) ([]byte, bool, error) {
 		fetched = append(fetched, rev)
 		switch rev {
 		case 1:
@@ -100,11 +100,63 @@ func TestUnmaskLazyFetchOnRotation(t *testing.T) {
 	}
 }
 
+func TestUnmaskRefreshesStaleKeyOnReenable(t *testing.T) {
+	// Disable → re-enable masking reuses rev 1 with a NEW key. The old rev-1 key
+	// is cached (keychain + in-memory map). A token masked with the new key misses
+	// the stale map; a forced refresh (bypassing cache) must rebuild rev 1 with
+	// the fresh key and resolve.
+	root := newGitRepo(t, "app.go")
+	freshKey := testKeyRev2
+	var forced int
+	r := New(root, func(_ int, force bool) ([]byte, bool, error) {
+		if force {
+			forced++
+			return freshKey, true, nil // server now serves the re-enabled rev-1 key
+		}
+		return testKeyRev1, true, nil // stale cached key
+	})
+	// Warm rev 1 with the stale key.
+	if _, err := r.LoadRev(1); err != nil {
+		t.Fatal(err)
+	}
+
+	token := masking.MaskPath(freshKey, "app.go")
+	got, ok := r.Unmask(token, 1)
+	if !ok || got != "app.go" {
+		t.Fatalf("Unmask after re-enable = (%q, %v), want (app.go, true)", got, ok)
+	}
+	if forced != 1 {
+		t.Fatalf("expected exactly 1 forced refresh, got %d", forced)
+	}
+}
+
+func TestUnmaskForcedRefreshIsRateLimited(t *testing.T) {
+	// Tokens for files not in the local checkout legitimately never resolve; they
+	// must not trigger a forced refetch on every miss. Two misses at the same rev
+	// within the cooldown must force at most once.
+	root := newGitRepo(t, "app.go")
+	var forced int
+	r := New(root, func(_ int, force bool) ([]byte, bool, error) {
+		if force {
+			forced++
+		}
+		return testKeyRev1, true, nil
+	})
+	if _, err := r.LoadRev(1); err != nil {
+		t.Fatal(err)
+	}
+	r.Unmask(masking.MaskPath(testKeyRev2, "ghost1.go"), 1)
+	r.Unmask(masking.MaskPath(testKeyRev2, "ghost2.go"), 1)
+	if forced != 1 {
+		t.Fatalf("expected 1 forced refresh within cooldown, got %d", forced)
+	}
+}
+
 func TestUnmaskRevZeroScansAllLoaded(t *testing.T) {
 	// GRAPH responses carry no mask_key_rev and pass rev 0; the resolver must
 	// still find the token among loaded revs.
 	root := newGitRepo(t, "pkg/svc.go")
-	r := New(root, func(rev int) ([]byte, bool, error) {
+	r := New(root, func(rev int, _ bool) ([]byte, bool, error) {
 		return testKeyRev1, true, nil
 	})
 	if _, err := r.LoadRev(1); err != nil {
@@ -119,7 +171,7 @@ func TestUnmaskRevZeroScansAllLoaded(t *testing.T) {
 
 func TestLoadRevDisabledIsNoOp(t *testing.T) {
 	root := newGitRepo(t, "x.go")
-	r := New(root, func(rev int) ([]byte, bool, error) {
+	r := New(root, func(rev int, _ bool) ([]byte, bool, error) {
 		return nil, false, nil // server has no such rev (masking disabled)
 	})
 	ok, err := r.LoadRev(1)
