@@ -7,6 +7,7 @@ package mcpshim
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,6 +40,12 @@ func Run(cfg Config, in io.Reader, out io.Writer) error {
 		if err != nil {
 			resp = errorEnvelope(line, err)
 		} else {
+			// A notification (no id) is acked by the server with 202 and an
+			// empty body; it has no JSON-RPC response, so emit nothing rather
+			// than a stray blank line the client would have to skip.
+			if len(bytes.TrimSpace(resp)) == 0 {
+				continue
+			}
 			resp = enrichResponse(cfg, resp)
 		}
 		fmt.Fprintf(out, "%s\n", resp)
@@ -52,6 +59,11 @@ func forwardMessage(cfg Config, body []byte) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// FastMCP's streamable-HTTP transport validates Accept and requires BOTH
+	// media types even when the server is configured for JSON responses
+	// (stateless_http=True, json_response=True). Omitting this yields a 406 that
+	// surfaces to the agent as a -32000 "failed to connect" error.
+	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 
 	resp, err := http.DefaultClient.Do(req)

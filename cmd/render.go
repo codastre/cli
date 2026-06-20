@@ -13,6 +13,7 @@ type queryEnvelope struct {
 	SearchedRepos []string            `json:"searched_repos"`
 	Repos         map[string]repoInfo `json:"repos"`
 	SyncJobID     *string             `json:"sync_job_id"`
+	MaskKeyRev    int                 `json:"mask_key_rev"`
 	Results       []queryResult       `json:"results"`
 }
 
@@ -40,8 +41,14 @@ func (e queryEnvelope) repoLabel(repoID string) string {
 	return repoID
 }
 
-// renderQueryHuman writes a human-readable QUERY result to w.
-func renderQueryHuman(w io.Writer, payload json.RawMessage) error {
+// renderQueryHuman writes a human-readable QUERY result to w. When unmask is
+// non-nil it converts each result's HMAC path_token back to the real path for
+// display; an unmask miss (or nil unmask) falls back to showing the raw token.
+func renderQueryHuman(
+	w io.Writer,
+	payload json.RawMessage,
+	unmask func(pathToken string, maskKeyRev int) (string, bool),
+) error {
 	var env queryEnvelope
 	if err := json.Unmarshal(payload, &env); err != nil {
 		return fmt.Errorf("decode QUERY response: %w", err)
@@ -63,8 +70,14 @@ func renderQueryHuman(w io.Writer, payload json.RawMessage) error {
 		if r.SymbolName != nil && *r.SymbolName != "" {
 			sym = "  " + *r.SymbolName
 		}
+		path := r.PathToken
+		if unmask != nil {
+			if real, ok := unmask(r.PathToken, env.MaskKeyRev); ok {
+				path = real
+			}
+		}
 		fmt.Fprintf(w, "%2d. [%.3f] %s\n", i+1, r.Score, env.repoLabel(r.RepoID))
-		fmt.Fprintf(w, "    %s:%d-%d%s  (%s)\n", r.PathToken, r.LineStart, r.LineEnd, sym, r.ContentKind)
+		fmt.Fprintf(w, "    %s:%d-%d%s  (%s)\n", path, r.LineStart, r.LineEnd, sym, r.ContentKind)
 	}
 	return nil
 }

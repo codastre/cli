@@ -104,7 +104,7 @@ func TestRenderQueryHuman_MultiRepo(t *testing.T) {
 	})
 
 	var buf bytes.Buffer
-	if err := renderQueryHuman(&buf, payload); err != nil {
+	if err := renderQueryHuman(&buf, payload, nil); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -127,7 +127,7 @@ func TestRenderQueryHuman_Empty(t *testing.T) {
 		"results":        []any{},
 	})
 	var buf bytes.Buffer
-	if err := renderQueryHuman(&buf, payload); err != nil {
+	if err := renderQueryHuman(&buf, payload, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "No matches.") {

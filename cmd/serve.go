@@ -46,6 +46,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	repoRoot, _ := findGitRoot(".")
 
+	// The HEAD watcher's doSync reads syncServerURL; align it with serve --server.
+	syncServerURL = serveServerURL
+
 	if !serveNoWatch && repoRoot != "" {
 		go func() {
 			if err := watchAndSync(); err != nil {
@@ -55,16 +58,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	cfg := mcpshim.Config{
-		ServerURL: serveServerURL,
-		APIKey:    apiKey,
-		RepoRoot:  repoRoot,
-		UnmaskPath: func(pathToken string, maskKeyRev int) (string, bool) {
-			// Mask key lookup and HMAC inversion are not possible — the server
-			// sends the unmasked path via a separate KEY_ROTATED / masking-key
-			// endpoint. For M1 (single-tenant, single-key), we return empty to
-			// skip hydration rather than silently serving wrong paths.
-			return "", false
-		},
+		ServerURL:  serveServerURL,
+		APIKey:     apiKey,
+		RepoRoot:   repoRoot,
+		UnmaskPath: setupUnmask(serveServerURL, apiKey, repoRoot, store),
 	}
 	return mcpshim.Run(cfg, os.Stdin, os.Stdout)
 }

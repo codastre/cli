@@ -14,12 +14,23 @@ import (
 var connectCmd = &cobra.Command{
 	Use:   "connect <target>",
 	Short: "Register codastre as an MCP server in claude, codex, or opencode",
-	Long: `Writes the MCP HTTP server config for the given AI coding tool.
+	Long: `Writes the MCP server config for the given AI coding tool.
 
   claude    — ~/.claude.json (user), ~/.claude/mcp_settings.json (local),
               or .mcp.json in CWD (project); controlled by --scope
   codex     — ~/.codex/config.toml
   opencode  — ~/.config/opencode/opencode.json
+
+Two connection modes:
+
+  (default)  Direct HTTP — the agent talks straight to the server's /mcp
+             endpoint. Simplest, but returns MASKED path tokens for repos with
+             masking_scheme=hmac and does no local auto-sync.
+
+  --stdio    Local proxy — the agent launches 'codastre serve', which unmasks
+             paths, hydrates code snippets from local disk, and auto-syncs your
+             branch. REQUIRED for hmac-masked repos. Launch your agent from
+             inside the repository (serve resolves it from the local git root).
 
 The API key is read from the OS keychain; run 'codastre login' first.`,
 	Args: cobra.ExactArgs(1),
@@ -29,6 +40,7 @@ The API key is read from the OS keychain; run 'codastre login' first.`,
 var connectServerURL string
 var connectName string
 var connectScope string
+var connectStdio bool
 
 func init() {
 	connectCmd.Flags().StringVar(&connectServerURL, "server", defaultServerURL(), "Server URL [$CODASTRE_SERVER]")
@@ -36,6 +48,8 @@ func init() {
 	connectCmd.Flags().StringVar(&connectScope, "scope", "user",
 		`Claude config scope: user (global, ~/.claude.json), local (~/.claude/mcp_settings.json),`+
 			` or project (.mcp.json in CWD). Only applies to the 'claude' target.`)
+	connectCmd.Flags().BoolVar(&connectStdio, "stdio", false,
+		"Write a local-proxy (codastre serve) config instead of direct HTTP. Required for hmac-masked repos.")
 	rootCmd.AddCommand(connectCmd)
 }
 
@@ -60,11 +74,11 @@ func runConnect(cmd *cobra.Command, args []string) error {
 
 	switch target {
 	case "claude":
-		return connectClaude(cmd, name, mcpURL, apiKey, connectScope)
+		return connectClaude(cmd, name, mcpURL, serverURL, apiKey, connectScope, connectStdio)
 	case "codex":
-		return connectCodex(cmd, name, mcpURL, apiKey)
+		return connectCodex(cmd, name, mcpURL, serverURL, apiKey, connectStdio)
 	case "opencode":
-		return connectOpencode(cmd, name, mcpURL, apiKey)
+		return connectOpencode(cmd, name, mcpURL, serverURL, apiKey, connectStdio)
 	default:
 		return fmt.Errorf("unknown target %q — valid targets: claude, codex, opencode", target)
 	}
@@ -77,7 +91,7 @@ func runConnect(cmd *cobra.Command, args []string) error {
 //	project → .mcp.json in the current directory   (committed to git; this repo only)
 //
 // When writing to user scope, any stale entry in the local-scope file is removed.
-func connectClaude(cmd *cobra.Command, name, mcpURL, apiKey, scope string) error {
+func connectClaude(cmd *cobra.Command, name, mcpURL, serverURL, apiKey, scope string, stdio bool) error {
 	path, err := claudePathForScope(scope)
 	if err != nil {
 		return err
@@ -93,13 +107,7 @@ func connectClaude(cmd *cobra.Command, name, mcpURL, apiKey, scope string) error
 		servers = map[string]any{}
 	}
 	_, existed := servers[name]
-	servers[name] = map[string]any{
-		"type": "http",
-		"url":  mcpURL,
-		"headers": map[string]string{
-			"Authorization": "Bearer " + apiKey,
-		},
-	}
+	servers[name] = claudeEntry(mcpURL, serverURL, apiKey, stdio)
 	data["mcpServers"] = servers
 
 	if err := writeJSONFile(path, data); err != nil {
@@ -118,18 +126,28 @@ func connectClaude(cmd *cobra.Command, name, mcpURL, apiKey, scope string) error
 		verb = "Updated"
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "%s MCP server %q → %s\n", verb, name, path)
+	printModeHint(cmd, stdio)
 	return nil
 }
 
-// connectCodex merges into ~/.codex/config.toml using Codex's bearer_token_env_var
+// connectCodex merges into ~/.codex/config.toml. In stdio mode it writes a
+// command/args section that launches `codastre serve` (no token needed — serve
+// reads the keychain). In HTTP mode it uses Codex's bearer_token_env_var
 // convention and prints the export line the user must add to their shell profile.
-func connectCodex(cmd *cobra.Command, name, mcpURL, apiKey string) error {
+func connectCodex(cmd *cobra.Command, name, mcpURL, serverURL, apiKey string, stdio bool) error {
 	path, err := codexConfigPath()
 	if err != nil {
 		return err
 	}
-	envVar := strings.ToUpper(strings.ReplaceAll(name, "-", "_")) + "_API_KEY"
-	section := fmt.Sprintf("[mcp_servers.%s]\nurl = %q\nbearer_token_env_var = %q\n", name, mcpURL, envVar)
+
+	var section, envVar string
+	if stdio {
+		section = codexStdioSection(name, serverURL)
+	} else {
+		envVar = strings.ToUpper(strings.ReplaceAll(name, "-", "_")) + "_API_KEY"
+		section = fmt.Sprintf("[mcp_servers.%s]\nurl = %q\nbearer_token_env_var = %q\n", name, mcpURL, envVar)
+	}
+
 	existed, err := replaceTOMLSection(path, "mcp_servers."+name, section)
 	if err != nil {
 		return err
@@ -138,16 +156,23 @@ func connectCodex(cmd *cobra.Command, name, mcpURL, apiKey string) error {
 	if existed {
 		verb = "Updated"
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "%s MCP server %q → %s\n\n", verb, name, path)
+	fmt.Fprintf(cmd.OutOrStdout(), "%s MCP server %q → %s\n", verb, name, path)
+
+	if stdio {
+		printModeHint(cmd, true)
+		return nil
+	}
 	fmt.Fprintf(cmd.OutOrStdout(),
-		"Codex reads the token from an environment variable. Add this to your shell profile\n"+
+		"\nCodex reads the token from an environment variable. Add this to your shell profile\n"+
 			"(~/.zshrc or ~/.bash_profile), then restart your shell:\n\n")
 	fmt.Fprintf(cmd.OutOrStdout(), "  export %s=%q\n", envVar, apiKey)
+	printModeHint(cmd, false)
 	return nil
 }
 
-// connectOpencode merges a remote entry into ~/.config/opencode/opencode.json.
-func connectOpencode(cmd *cobra.Command, name, mcpURL, apiKey string) error {
+// connectOpencode merges an MCP entry into ~/.config/opencode/opencode.json:
+// a "local" (command) entry in stdio mode, or a "remote" (url) entry otherwise.
+func connectOpencode(cmd *cobra.Command, name, mcpURL, serverURL, apiKey string, stdio bool) error {
 	path, err := opencodeConfigPath()
 	if err != nil {
 		return err
@@ -162,13 +187,7 @@ func connectOpencode(cmd *cobra.Command, name, mcpURL, apiKey string) error {
 		mcp = map[string]any{}
 	}
 	_, existed := mcp[name]
-	mcp[name] = map[string]any{
-		"type": "remote",
-		"url":  mcpURL,
-		"headers": map[string]string{
-			"Authorization": "Bearer " + apiKey,
-		},
-	}
+	mcp[name] = opencodeEntry(mcpURL, serverURL, apiKey, stdio)
 	data["mcp"] = mcp
 
 	if err := writeJSONFile(path, data); err != nil {
@@ -179,6 +198,7 @@ func connectOpencode(cmd *cobra.Command, name, mcpURL, apiKey string) error {
 		verb = "Updated"
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "%s MCP server %q → %s\n", verb, name, path)
+	printModeHint(cmd, stdio)
 	return nil
 }
 

@@ -127,12 +127,12 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	}
 
 	if asJSON {
+		// --json is a raw passthrough of the server envelope (path_tokens intact),
+		// so agents that parse it can unmask themselves via the proxy or keychain.
 		return printJSON(cmd.OutOrStdout(), payload)
 	}
-	if !asJSON {
-		fmt.Fprintf(cmd.ErrOrStderr(), "target: %s\n", tgt.describe())
-	}
-	return renderQueryHuman(cmd.OutOrStdout(), payload)
+	fmt.Fprintf(cmd.ErrOrStderr(), "target: %s\n", tgt.describe())
+	return renderQueryHuman(cmd.OutOrStdout(), payload, queryUnmask(apiKey))
 }
 
 // queryErrorHint augments known tool errors with an actionable next step.

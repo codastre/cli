@@ -1,11 +1,16 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/codastre/cli/internal/git"
+	"github.com/codastre/cli/internal/keychain"
+	"github.com/codastre/cli/internal/mcpclient"
+	"github.com/codastre/cli/internal/unmask"
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 )
@@ -17,9 +22,11 @@ var syncCmd = &cobra.Command{
 }
 
 var syncOnce bool
+var syncServerURL string
 
 func init() {
 	syncCmd.Flags().BoolVar(&syncOnce, "once", false, "Single sync then exit")
+	syncCmd.Flags().StringVar(&syncServerURL, "server", defaultServerURL(), "Server URL [$CODASTRE_SERVER]")
 	rootCmd.AddCommand(syncCmd)
 }
 
@@ -95,11 +102,120 @@ func pollSync(repoRoot string) error {
 	}
 }
 
-// doSync performs one SYNC round-trip with the server.
+// doSync performs one SYNC round-trip: resolve the local repo and its base index,
+// diff the base against HEAD, mask the changed paths, and push the overlay delta
+// over MCP SYNC.
+//
+// It no-ops quietly (returning nil) when there is nothing to do — HEAD is the
+// base, the repo isn't registered, or no base index is ready — so the HEAD
+// watcher does not spam errors on every commit to the base branch.
 func doSync() error {
-	// TODO: full SYNC implementation (diff compute → mask → POST MCP SYNC)
-	fmt.Println("sync: triggered")
+	repoRoot, err := findGitRoot(".")
+	if err != nil {
+		return err
+	}
+	serverURL := syncServerURL
+	apiKey, warn, err := resolveAPIKey(serverURL, "")
+	if err != nil {
+		return err
+	}
+	if warn != "" {
+		fmt.Fprintln(os.Stderr, "warning: "+warn)
+	}
+
+	remote, err := getRemoteURL(repoRoot)
+	if err != nil {
+		return nil // no origin → nothing to sync against
+	}
+	normalized, err := git.Normalize(remote)
+	if err != nil {
+		return nil
+	}
+
+	info, err := unmask.ResolveRepo(serverURL, apiKey, normalized)
+	if err != nil {
+		return err
+	}
+	if info == nil {
+		fmt.Fprintf(os.Stderr, "sync: %s is not registered — REGISTER it first\n", normalized)
+		return nil
+	}
+
+	base, err := unmask.ResolveBaseIndex(serverURL, apiKey, info.RepoID)
+	if err != nil {
+		return err
+	}
+	if base == nil {
+		fmt.Fprintln(os.Stderr, "sync: no ready base index yet — skipping")
+		return nil
+	}
+
+	toName, toSHA, err := git.HeadRef(repoRoot)
+	if err != nil {
+		return err
+	}
+	if toSHA == base.BaseRefSHA {
+		return nil // on the base commit; nothing to overlay
+	}
+
+	diff, err := git.ComputeDiff(repoRoot, base.BaseRefSHA, toSHA)
+	if err != nil {
+		return err
+	}
+
+	args := map[string]any{
+		"index_id":      base.IndexID,
+		"from_ref_name": base.BaseRefName,
+		"from_ref_sha":  base.BaseRefSHA,
+		"to_ref_name":   toName,
+		"to_ref_sha":    toSHA,
+		"mask_key_rev":  info.MaskKeyRev,
+		"diff_omitted":  diff.DiffOmitted,
+		"manifest_mode": diff.ManifestMode,
+	}
+
+	if diff.DiffOmitted {
+		// Over cap: send refs only; the server diffs its own clone.
+		args["diff"] = []map[string]any{}
+	} else {
+		key, err := syncMaskKey(serverURL, apiKey, info)
+		if err != nil {
+			return err
+		}
+		args["diff"] = buildDiffTuples(diff.Entries, info.MaskingScheme, key)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	payload, err := mcpclient.Call(ctx, mcpclient.Config{ServerURL: serverURL, APIKey: apiKey}, "SYNC", args)
+	if err != nil {
+		return err
+	}
+
+	status, jobID := parseSyncResult(payload)
+	fmt.Fprintf(os.Stderr, "sync: %s → %s (status=%s job=%s)\n", base.BaseRefName, toName, status, jobID)
 	return nil
+}
+
+// syncMaskKey returns the masking key needed to mask the diff, or nil for an
+// unmasked repo (where no key is required).
+func syncMaskKey(serverURL, apiKey string, info *unmask.RepoInfo) ([]byte, error) {
+	if !info.IsMasked() {
+		return nil, nil
+	}
+	store, _, err := keychain.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open keychain: %w", err)
+	}
+	host := extractHost(serverURL)
+	key, ok, err := fetchMaskKey(serverURL, apiKey, host, info.RepoID, info.MaskKeyRev, store)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("no masking key for rev %d", info.MaskKeyRev)
+	}
+	return key, nil
 }
 
 // findGitRoot walks up from start until it finds a .git directory.
