@@ -82,9 +82,10 @@ func forwardMessage(cfg Config, body []byte) ([]byte, error) {
 	return data, nil
 }
 
-// enrichResponse dispatches to enrichQueryResponse or enrichGraphResponse based
-// on which top-level key is present in the JSON payload. Returns data unchanged
-// if neither "results" nor "edges" is found.
+// enrichResponse unmasks a QUERY/GRAPH payload. MCP tool results arrive wrapped
+// in a JSON-RPC envelope ({"result":{"structuredContent":{…},"content":[{"type":
+// "text","text":"<json>"}]}}); the payload may also appear bare (un-enveloped).
+// Returns data unchanged when no known payload is found.
 func enrichResponse(cfg Config, data []byte) []byte {
 	if cfg.UnmaskPath == nil {
 		return data
@@ -93,13 +94,126 @@ func enrichResponse(cfg Config, data []byte) []byte {
 	if err := json.Unmarshal(data, &env); err != nil {
 		return data
 	}
+	// Bare payload (e.g. a direct REST shape or unit-test input).
 	if _, ok := env["results"]; ok {
 		return enrichQueryResponse(cfg, data)
 	}
 	if _, ok := env["edges"]; ok {
 		return enrichGraphResponse(cfg, data)
 	}
-	return data
+
+	// JSON-RPC tool-result envelope: the QUERY/GRAPH payload is nested under
+	// result.structuredContent and mirrored as a JSON string in
+	// result.content[0].text. Enrich the inner payload, then write it back to
+	// both so agents reading either representation see the unmasked paths.
+	resultRaw, ok := env["result"]
+	if !ok {
+		return data
+	}
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(resultRaw, &result); err != nil {
+		return data
+	}
+	enriched, ok := enrichToolPayload(cfg, result)
+	if !ok {
+		return data
+	}
+	result["structuredContent"] = enriched
+	setContentText(result, enriched)
+	resultB, err := json.Marshal(result)
+	if err != nil {
+		return data
+	}
+	env["result"] = resultB
+	out, err := json.Marshal(env)
+	if err != nil {
+		return data
+	}
+	return out
+}
+
+// enrichToolPayload enriches the QUERY/GRAPH payload inside a tool result,
+// preferring result.structuredContent and falling back to the JSON string in
+// the first text content block. Returns (enriched, true) when a known payload
+// was found and processed.
+func enrichToolPayload(cfg Config, result map[string]json.RawMessage) ([]byte, bool) {
+	payload, ok := toolPayloadBytes(result)
+	if !ok {
+		return nil, false
+	}
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &env); err != nil {
+		return nil, false
+	}
+	if _, ok := env["results"]; ok {
+		return enrichQueryResponse(cfg, payload), true
+	}
+	if _, ok := env["edges"]; ok {
+		return enrichGraphResponse(cfg, payload), true
+	}
+	return nil, false
+}
+
+// toolPayloadBytes returns the inner tool payload JSON: structuredContent when
+// present, else the decoded text of the first text content block.
+func toolPayloadBytes(result map[string]json.RawMessage) ([]byte, bool) {
+	if sc, ok := result["structuredContent"]; ok && len(sc) > 0 && string(sc) != "null" {
+		return sc, true
+	}
+	return firstContentText(result)
+}
+
+// firstContentText decodes the JSON string in the first type=="text" content block.
+func firstContentText(result map[string]json.RawMessage) ([]byte, bool) {
+	raw, ok := result["content"]
+	if !ok {
+		return nil, false
+	}
+	var content []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &content); err != nil {
+		return nil, false
+	}
+	for _, block := range content {
+		if blockType(block) != "text" {
+			continue
+		}
+		var s string
+		if err := json.Unmarshal(block["text"], &s); err != nil {
+			return nil, false
+		}
+		return []byte(s), true
+	}
+	return nil, false
+}
+
+// setContentText writes enriched (a JSON payload) back into the first text
+// content block as a JSON string.
+func setContentText(result map[string]json.RawMessage, enriched []byte) {
+	raw, ok := result["content"]
+	if !ok {
+		return
+	}
+	var content []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &content); err != nil {
+		return
+	}
+	for i, block := range content {
+		if blockType(block) != "text" {
+			continue
+		}
+		block["text"], _ = json.Marshal(string(enriched))
+		content[i] = block
+		break
+	}
+	result["content"], _ = json.Marshal(content)
+}
+
+func blockType(block map[string]json.RawMessage) string {
+	var t string
+	if raw, ok := block["type"]; ok {
+		_ = json.Unmarshal(raw, &t)
+	}
+	return t
 }
 
 // enrichQueryResponse unmasks path_tokens and hydrates snippets in QUERY responses.
@@ -122,9 +236,17 @@ func enrichQueryResponse(cfg Config, data []byte) []byte {
 		return data
 	}
 
+	// The index-free (federated) QUERY path returns mask_key_rev: null and puts
+	// the authoritative version in the per-repo map mask_key_revs. Resolve each
+	// result at its own repo's rev so a key rotation is honoured; fall back to
+	// the singular field (Mode A, single-index queries).
 	var maskKeyRev int
 	if raw, ok := env["mask_key_rev"]; ok {
 		_ = json.Unmarshal(raw, &maskKeyRev)
+	}
+	maskKeyRevs := map[string]int{}
+	if raw, ok := env["mask_key_revs"]; ok {
+		_ = json.Unmarshal(raw, &maskKeyRevs)
 	}
 
 	for i, r := range results {
@@ -132,7 +254,15 @@ func enrichQueryResponse(cfg Config, data []byte) []byte {
 		if raw, ok := r["path_token"]; ok {
 			_ = json.Unmarshal(raw, &pathToken)
 		}
-		realPath, ok := cfg.UnmaskPath(pathToken, maskKeyRev)
+		rev := maskKeyRev
+		var repoID string
+		if raw, ok := r["repo_id"]; ok {
+			_ = json.Unmarshal(raw, &repoID)
+		}
+		if v, ok := maskKeyRevs[repoID]; ok {
+			rev = v
+		}
+		realPath, ok := cfg.UnmaskPath(pathToken, rev)
 		if !ok {
 			continue
 		}
