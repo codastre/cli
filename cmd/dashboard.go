@@ -40,23 +40,42 @@ var (
 
 func init() {
 	dashboardCmd.Flags().StringVar(&dashboardServerURL, "server", defaultServerURL(), "Server URL [$CODASTRE_SERVER]")
-	dashboardCmd.Flags().StringVar(&dashboardURL, "dashboard", defaultDashboardURL(), "Dashboard URL [$CODASTRE_DASHBOARD_URL]")
+	dashboardCmd.Flags().StringVar(&dashboardURL, "dashboard", "", "Dashboard URL (default: auto-discovered from the server) [$CODASTRE_DASHBOARD_URL]")
 	dashboardCmd.Flags().StringVar(&dashboardKeyFlag, "key", "", "API key override (default: keychain / $CODASTRE_API_KEY)")
 	dashboardCmd.Flags().BoolVar(&dashboardNoBrowser, "no-browser", false, "Print the URL instead of opening a browser")
 	rootCmd.AddCommand(dashboardCmd)
 }
 
-// defaultDashboardURL returns $CODASTRE_DASHBOARD_URL, falling back to localhost.
-func defaultDashboardURL() string {
-	if v := os.Getenv("CODASTRE_DASHBOARD_URL"); v != "" {
-		return v
+// resolveDashboardURL determines which dashboard origin to open, by precedence:
+//
+//	--dashboard flag  >  $CODASTRE_DASHBOARD_URL  >  server auto-discovery  >  localhost
+//
+// Auto-discovery asks the server (which the CLI already knows) for its configured
+// dashboard URL, so a deployment behind a real domain needs no client-side config.
+// warn is a non-fatal message printed to stderr when discovery fails and the
+// localhost fallback is used; it is empty otherwise.
+func resolveDashboardURL(serverURL string) (dash, warn string) {
+	if dashboardURL != "" {
+		return strings.TrimRight(dashboardURL, "/"), ""
 	}
-	return "http://localhost:3000"
+	if v := os.Getenv("CODASTRE_DASHBOARD_URL"); v != "" {
+		return strings.TrimRight(v, "/"), ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if d := discover(ctx, serverURL); d != nil && d.DashboardURL != "" {
+		return strings.TrimRight(d.DashboardURL, "/"), ""
+	}
+	return "http://localhost:3000", "could not auto-discover the dashboard URL from " + serverURL +
+		"; falling back to http://localhost:3000 (set --dashboard or $CODASTRE_DASHBOARD_URL to override)"
 }
 
 func runDashboard(cmd *cobra.Command, _ []string) error {
 	serverURL := strings.TrimRight(dashboardServerURL, "/")
-	dashURL := strings.TrimRight(dashboardURL, "/")
+	dashURL, dashWarn := resolveDashboardURL(serverURL)
+	if dashWarn != "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "warning:", dashWarn)
+	}
 
 	apiKey, warn, err := resolveAPIKey(serverURL, dashboardKeyFlag)
 	if err != nil {
