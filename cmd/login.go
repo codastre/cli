@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -19,11 +21,27 @@ var loginCmd = &cobra.Command{
 	RunE:  runLogin,
 }
 
-var loginServerURL string
+var (
+	loginServerURL string
+	loginLabel     string
+)
 
 func init() {
 	loginCmd.Flags().StringVar(&loginServerURL, "server", defaultServerURL(), "Server URL [$CODASTRE_SERVER]")
+	loginCmd.Flags().StringVar(&loginLabel, "label", "", "Human label for this key so the agent is distinguishable (default: hostname)")
 	rootCmd.AddCommand(loginCmd)
+}
+
+// deviceLabel returns the explicit --label, falling back to the machine hostname
+// so a member's keys are distinguishable in the dashboard without extra flags.
+func deviceLabel() string {
+	if strings.TrimSpace(loginLabel) != "" {
+		return strings.TrimSpace(loginLabel)
+	}
+	if host, err := os.Hostname(); err == nil && host != "" {
+		return host
+	}
+	return ""
 }
 
 type deviceCodeResp struct {
@@ -42,7 +60,11 @@ type tokenResp struct {
 func runLogin(cmd *cobra.Command, args []string) error {
 	serverURL := strings.TrimRight(loginServerURL, "/")
 
-	resp, err := http.Post(serverURL+"/v1/auth/device", "application/json", strings.NewReader("{}"))
+	reqBody, err := json.Marshal(map[string]string{"label": deviceLabel()})
+	if err != nil {
+		return fmt.Errorf("encode device request: %w", err)
+	}
+	resp, err := http.Post(serverURL+"/v1/auth/device", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("device code request: %w", err)
 	}
