@@ -30,7 +30,7 @@ Each release also ships `checksums.txt` for verification (`sha256sum -c`).
 **With Go ≥ 1.22:**
 
 ```bash
-go install github.com/codastre/cli@latest
+go install github.com/codastre/cli/cmd/codastre@latest
 ```
 
 ## Usage
