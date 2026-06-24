@@ -23,7 +23,7 @@ import (
 
 // Config configures a one-shot tool call.
 type Config struct {
-	ServerURL string // base URL, e.g. http://localhost:8000 (no trailing /mcp)
+	ServerURL string // base URL, e.g. https://api.codastre.com (no trailing /mcp)
 	APIKey    string
 }
 
