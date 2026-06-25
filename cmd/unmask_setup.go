@@ -167,15 +167,14 @@ func cwdRepo() (root, url string) {
 
 // locateCheckout returns a local clone directory whose origin matches repoURL: an
 // explicit --repo-path (validated) takes priority over the remembered registry.
-// Returns "" when none is known or valid. A --repo-path that doesn't match the
-// target is reported to warnW since the user asked for it explicitly.
+// A --repo-path that doesn't match the target is reported to warnW and ignored,
+// then the registry is tried as a fallback. Returns "" when none is known or valid.
 func locateCheckout(warnW io.Writer, repoPath, repoURL string) string {
 	if repoPath != "" {
 		if dirMatchesRepo(repoPath, repoURL) {
 			return repoPath
 		}
 		fmt.Fprintf(warnW, "warning: --repo-path %s is not a checkout of %s; ignoring it\n", repoPath, repoURL)
-		return ""
 	}
 	if dir, ok := checkouts.Lookup(repoURL); ok && dirMatchesRepo(dir, repoURL) {
 		return dir
