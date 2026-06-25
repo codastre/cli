@@ -36,9 +36,12 @@ Reading the output:
   • each result carries repo_id; the 'repos' map (in --json) resolves it to a
     remote_url. Paths are returned as path_token (cleartext unless the repo uses
     HMAC masking). For an HMAC-masked repo, human output unmasks tokens back to
-    real paths using the local checkout + masking key (best-effort; tokens for
-    files not checked out locally stay masked). Pass --no-unmask to skip it, or
-    --json for the raw envelope (always masked).
+    real paths by hashing a local checkout's files with the masking key (HMAC is
+    one-way, so the key alone can't reverse a token — real paths are needed).
+    When you run outside the queried repo, codastre uses a checkout remembered
+    from a previous in-repo run, or one you point at with --repo-path <dir>.
+    Best-effort: tokens for files not in that checkout stay masked. Pass
+    --no-unmask to skip it, or --json for the raw envelope (always masked).
 
 Auth resolves in order: --key, $CODASTRE_API_KEY, then the OS keychain / file
 fallback populated by 'codastre login'.
@@ -68,6 +71,7 @@ var (
 	queryJSON         bool
 	queryFormat       string
 	queryNoUnmask     bool
+	queryRepoPath     string
 )
 
 func init() {
@@ -85,6 +89,7 @@ func init() {
 	f.BoolVar(&queryJSON, "json", false, "Emit the raw JSON envelope instead of human output")
 	f.StringVar(&queryFormat, "format", "human", "Output format: human | json")
 	f.BoolVar(&queryNoUnmask, "no-unmask", false, "Show raw masked path_tokens; skip unmasking to real paths")
+	f.StringVar(&queryRepoPath, "repo-path", "", "Local checkout of the queried repo to unmask against (when run outside it)")
 	rootCmd.AddCommand(queryCmd)
 }
 
@@ -139,7 +144,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(cmd.ErrOrStderr(), "target: %s\n", tgt.describe())
 	var unmask func(pathToken string, maskKeyRev int) (string, bool)
 	if !queryNoUnmask {
-		unmask = resolveUnmask(cmd.ErrOrStderr(), tgt, queryServerURL, apiKey)
+		unmask = resolveUnmask(cmd.ErrOrStderr(), tgt, queryRepoPath, queryServerURL, apiKey)
 	}
 	return renderQueryHuman(cmd.OutOrStdout(), payload, unmask)
 }

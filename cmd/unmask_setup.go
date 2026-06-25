@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/codastre/cli/internal/checkouts"
 	"github.com/codastre/cli/internal/git"
 	"github.com/codastre/cli/internal/keychain"
 	"github.com/codastre/cli/internal/unmask"
@@ -98,34 +99,103 @@ func fetchMaskKey(
 // resolveUnmask builds the path-unmasking function for a one-shot query/graph run
 // and explains (to warnW) when unmasking cannot apply.
 //
-// Unmasking inverts per-component HMAC by enumerating the LOCAL working tree (see
-// internal/unmask), so a token only resolves when the queried repo is the current
-// checkout. When the run explicitly targets a different repo (--repo-url) than the
-// CWD repo, no local file can match its tokens — building the resolver would be
-// pure cost with every lookup missing. We skip it and, when that repo is actually
-// HMAC-masked, tell the user how to get real paths instead of silently printing
-// masked tokens. A federated (--all) or --index-id run keeps the best-effort CWD
-// resolver: it unmasks results from the CWD repo and leaves the rest masked.
+// Unmasking inverts per-component HMAC by enumerating a working tree (see
+// internal/unmask) — the masking key alone can't reverse a one-way hash, so a
+// token only resolves against the real paths of a local clone of that repo.
+//
+// Resolution, in order:
+//   - target is the CWD repo (or a federated --all / --index-id run): unmask
+//     against the CWD checkout (best-effort; --all leaves other repos masked);
+//   - target is a different repo: unmask against an explicit --repo-path, else a
+//     clone remembered from a previous in-repo run (~/.config/codastre);
+//   - none of those: if the target repo is HMAC-masked, warn how to get real
+//     paths rather than silently printing masked tokens.
+//
+// Every in-repo run records the CWD repo→path mapping so later cross-directory
+// runs against that repo can find it automatically.
 func resolveUnmask(
 	warnW io.Writer,
 	tgt target,
-	serverURL, apiKey string,
+	repoPath, serverURL, apiKey string,
 ) func(pathToken string, maskKeyRev int) (string, bool) {
-	cwdURL := autoTarget() // normalized origin of the CWD repo, "" if none
-
-	if tgt.repoURL != "" && tgt.repoURL != cwdURL {
-		info, err := unmask.ResolveRepo(serverURL, apiKey, tgt.repoURL)
-		if err == nil && info != nil && info.IsMasked() {
-			if cwdURL == "" {
-				fmt.Fprintf(warnW, "warning: paths shown masked — run inside a checkout of %s to unmask, or pass --no-unmask\n", tgt.repoURL)
-			} else {
-				fmt.Fprintf(warnW, "warning: paths shown masked — results are for %s but this is the %s checkout; run inside the target repo to unmask, or pass --no-unmask\n", tgt.repoURL, cwdURL)
-			}
-		}
-		return nil
+	cwdRoot, cwdURL := cwdRepo()
+	if cwdURL != "" {
+		_ = checkouts.Remember(cwdURL, cwdRoot) // learn this checkout's location
 	}
 
-	return cwdUnmask(serverURL, apiKey)
+	// Same repo as the CWD, or a non-repo-scoped run (--all / --index-id): the
+	// CWD checkout is the right (or only knowable) source of candidate paths.
+	if tgt.repoURL == "" || tgt.repoURL == cwdURL {
+		return cwdUnmask(serverURL, apiKey)
+	}
+
+	// Cross-repo: find a local clone of the target to hash against.
+	if dir := locateCheckout(warnW, repoPath, tgt.repoURL); dir != "" {
+		if store, _, err := keychain.Open(); err == nil {
+			if fn := setupUnmask(serverURL, apiKey, dir, store); fn != nil {
+				return fn
+			}
+		}
+	}
+
+	// No local clone available. Only nag when there is actually something to
+	// unmask (an HMAC-masked target); cleartext repos need no warning.
+	if info, err := unmask.ResolveRepo(serverURL, apiKey, tgt.repoURL); err == nil && info != nil && info.IsMasked() {
+		fmt.Fprintf(warnW, "warning: paths shown masked — no local checkout of %s found; pass --repo-path <dir>, run once inside it, or use --no-unmask\n", tgt.repoURL)
+	}
+	return nil
+}
+
+// cwdRepo returns the git root and normalized origin URL of the current
+// directory's repository, or ("", "") when the CWD is not a git repo with an
+// origin remote.
+func cwdRepo() (root, url string) {
+	root, err := findGitRoot(".")
+	if err != nil {
+		return "", ""
+	}
+	remote, err := getRemoteURL(root)
+	if err != nil {
+		return "", ""
+	}
+	norm, err := git.Normalize(remote)
+	if err != nil {
+		return "", ""
+	}
+	return root, norm
+}
+
+// locateCheckout returns a local clone directory whose origin matches repoURL: an
+// explicit --repo-path (validated) takes priority over the remembered registry.
+// Returns "" when none is known or valid. A --repo-path that doesn't match the
+// target is reported to warnW since the user asked for it explicitly.
+func locateCheckout(warnW io.Writer, repoPath, repoURL string) string {
+	if repoPath != "" {
+		if dirMatchesRepo(repoPath, repoURL) {
+			return repoPath
+		}
+		fmt.Fprintf(warnW, "warning: --repo-path %s is not a checkout of %s; ignoring it\n", repoPath, repoURL)
+		return ""
+	}
+	if dir, ok := checkouts.Lookup(repoURL); ok && dirMatchesRepo(dir, repoURL) {
+		return dir
+	}
+	return ""
+}
+
+// dirMatchesRepo reports whether dir is a git checkout whose origin normalizes to
+// repoURL — guards against a stale registry entry or a wrong --repo-path.
+func dirMatchesRepo(dir, repoURL string) bool {
+	root, err := findGitRoot(dir)
+	if err != nil {
+		return false
+	}
+	remote, err := getRemoteURL(root)
+	if err != nil {
+		return false
+	}
+	norm, err := git.Normalize(remote)
+	return err == nil && norm == repoURL
 }
 
 // cwdUnmask builds an UnmaskPath for one-shot `codastre query` / `codastre graph`
