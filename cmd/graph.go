@@ -129,7 +129,7 @@ func runGraph(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(cmd.ErrOrStderr(), "target: %s\n", tgt.describe())
 	var unmask func(pathToken string, maskKeyRev int) (string, bool)
 	if !graphNoUnmask {
-		unmask = cwdUnmask(graphServerURL, apiKey)
+		unmask = resolveUnmask(cmd.ErrOrStderr(), tgt, graphServerURL, apiKey)
 	}
 	return renderGraphHuman(cmd.OutOrStdout(), payload, unmask)
 }

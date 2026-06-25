@@ -139,7 +139,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(cmd.ErrOrStderr(), "target: %s\n", tgt.describe())
 	var unmask func(pathToken string, maskKeyRev int) (string, bool)
 	if !queryNoUnmask {
-		unmask = cwdUnmask(queryServerURL, apiKey)
+		unmask = resolveUnmask(cmd.ErrOrStderr(), tgt, queryServerURL, apiKey)
 	}
 	return renderQueryHuman(cmd.OutOrStdout(), payload, unmask)
 }

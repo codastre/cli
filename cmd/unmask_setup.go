@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/codastre/cli/internal/git"
@@ -92,6 +93,39 @@ func fetchMaskKey(
 	}
 	key, ok := keys[rev]
 	return key, ok, nil
+}
+
+// resolveUnmask builds the path-unmasking function for a one-shot query/graph run
+// and explains (to warnW) when unmasking cannot apply.
+//
+// Unmasking inverts per-component HMAC by enumerating the LOCAL working tree (see
+// internal/unmask), so a token only resolves when the queried repo is the current
+// checkout. When the run explicitly targets a different repo (--repo-url) than the
+// CWD repo, no local file can match its tokens — building the resolver would be
+// pure cost with every lookup missing. We skip it and, when that repo is actually
+// HMAC-masked, tell the user how to get real paths instead of silently printing
+// masked tokens. A federated (--all) or --index-id run keeps the best-effort CWD
+// resolver: it unmasks results from the CWD repo and leaves the rest masked.
+func resolveUnmask(
+	warnW io.Writer,
+	tgt target,
+	serverURL, apiKey string,
+) func(pathToken string, maskKeyRev int) (string, bool) {
+	cwdURL := autoTarget() // normalized origin of the CWD repo, "" if none
+
+	if tgt.repoURL != "" && tgt.repoURL != cwdURL {
+		info, err := unmask.ResolveRepo(serverURL, apiKey, tgt.repoURL)
+		if err == nil && info != nil && info.IsMasked() {
+			if cwdURL == "" {
+				fmt.Fprintf(warnW, "warning: paths shown masked — run inside a checkout of %s to unmask, or pass --no-unmask\n", tgt.repoURL)
+			} else {
+				fmt.Fprintf(warnW, "warning: paths shown masked — results are for %s but this is the %s checkout; run inside the target repo to unmask, or pass --no-unmask\n", tgt.repoURL, cwdURL)
+			}
+		}
+		return nil
+	}
+
+	return cwdUnmask(serverURL, apiKey)
 }
 
 // cwdUnmask builds an UnmaskPath for one-shot `codastre query` / `codastre graph`
