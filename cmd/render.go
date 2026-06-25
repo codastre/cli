@@ -107,15 +107,31 @@ type edgeNode struct {
 	LineEnd   int    `json:"line_end"`
 }
 
-func (n edgeNode) ref() string {
+// ref renders the node as path:lines. When unmask is non-nil it converts the
+// HMAC path_token back to the real path; an unmask miss (or nil unmask) falls
+// back to showing the raw token. GRAPH responses carry no top-level mask_key_rev,
+// so rev 0 is passed — the resolver scans all loaded revisions for a match.
+func (n edgeNode) ref(unmask func(pathToken string, maskKeyRev int) (string, bool)) string {
 	if n.PathToken == "" {
 		return "?"
 	}
-	return fmt.Sprintf("%s:%d-%d", n.PathToken, n.LineStart, n.LineEnd)
+	path := n.PathToken
+	if unmask != nil {
+		if real, ok := unmask(n.PathToken, 0); ok {
+			path = real
+		}
+	}
+	return fmt.Sprintf("%s:%d-%d", path, n.LineStart, n.LineEnd)
 }
 
-// renderGraphHuman writes a human-readable GRAPH traversal to w.
-func renderGraphHuman(w io.Writer, payload json.RawMessage) error {
+// renderGraphHuman writes a human-readable GRAPH traversal to w. When unmask is
+// non-nil each edge's src/dst HMAC path_tokens are converted back to real paths
+// for display, falling back to the raw token on a miss.
+func renderGraphHuman(
+	w io.Writer,
+	payload json.RawMessage,
+	unmask func(pathToken string, maskKeyRev int) (string, bool),
+) error {
 	var env graphEnvelope
 	if err := json.Unmarshal(payload, &env); err != nil {
 		return fmt.Errorf("decode GRAPH response: %w", err)
@@ -145,7 +161,7 @@ func renderGraphHuman(w io.Writer, payload json.RawMessage) error {
 			mult = fmt.Sprintf("  (×%d)", e.Count)
 		}
 		fmt.Fprintf(w, " • %-8s %s → %s%s   conf %.2f  %s%s\n",
-			kind, e.Src.ref(), e.Dst.ref(), mult, e.Confidence, e.Resolution, hint)
+			kind, e.Src.ref(unmask), e.Dst.ref(unmask), mult, e.Confidence, e.Resolution, hint)
 	}
 	return nil
 }

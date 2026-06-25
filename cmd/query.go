@@ -35,7 +35,10 @@ Reading the output:
   • freshness is the worst case across searched repos: fresh | syncing | degraded.
   • each result carries repo_id; the 'repos' map (in --json) resolves it to a
     remote_url. Paths are returned as path_token (cleartext unless the repo uses
-    HMAC masking).
+    HMAC masking). For an HMAC-masked repo, human output unmasks tokens back to
+    real paths using the local checkout + masking key (best-effort; tokens for
+    files not checked out locally stay masked). Pass --no-unmask to skip it, or
+    --json for the raw envelope (always masked).
 
 Auth resolves in order: --key, $CODASTRE_API_KEY, then the OS keychain / file
 fallback populated by 'codastre login'.
@@ -64,6 +67,7 @@ var (
 	queryContentKinds []string
 	queryJSON         bool
 	queryFormat       string
+	queryNoUnmask     bool
 )
 
 func init() {
@@ -80,6 +84,7 @@ func init() {
 	f.StringSliceVar(&queryContentKinds, "content-kinds", nil, "Filter by content kinds (repeatable)")
 	f.BoolVar(&queryJSON, "json", false, "Emit the raw JSON envelope instead of human output")
 	f.StringVar(&queryFormat, "format", "human", "Output format: human | json")
+	f.BoolVar(&queryNoUnmask, "no-unmask", false, "Show raw masked path_tokens; skip unmasking to real paths")
 	rootCmd.AddCommand(queryCmd)
 }
 
@@ -132,7 +137,11 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		return printJSON(cmd.OutOrStdout(), payload)
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "target: %s\n", tgt.describe())
-	return renderQueryHuman(cmd.OutOrStdout(), payload, queryUnmask(apiKey))
+	var unmask func(pathToken string, maskKeyRev int) (string, bool)
+	if !queryNoUnmask {
+		unmask = cwdUnmask(queryServerURL, apiKey)
+	}
+	return renderQueryHuman(cmd.OutOrStdout(), payload, unmask)
 }
 
 // queryErrorHint augments known tool errors with an actionable next step.

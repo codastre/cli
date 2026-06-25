@@ -153,7 +153,7 @@ func TestRenderGraphHuman_Count(t *testing.T) {
 		},
 	})
 	var buf bytes.Buffer
-	if err := renderGraphHuman(&buf, payload); err != nil {
+	if err := renderGraphHuman(&buf, payload, nil); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -165,6 +165,91 @@ func TestRenderGraphHuman_Count(t *testing.T) {
 	}
 	if !strings.Contains(out, "[hypothesis]") {
 		t.Error("expected [hypothesis] flag for low-confidence dynamic edge")
+	}
+}
+
+func TestRenderGraphHuman_Unmask(t *testing.T) {
+	payload := mustJSON(t, map[string]any{
+		"edges": []any{
+			map[string]any{
+				"edge":       map[string]any{"kind": "calls"},
+				"src":        map[string]any{"path_token": "TOKsrc", "line_start": 1, "line_end": 9},
+				"dst":        map[string]any{"path_token": "TOKdst", "line_start": 3, "line_end": 7},
+				"confidence": 0.9, "resolution": "heuristic", "count": 1,
+			},
+		},
+	})
+	// GRAPH carries no mask_key_rev, so the renderer must pass rev 0.
+	unmask := func(token string, rev int) (string, bool) {
+		if rev != 0 {
+			t.Errorf("expected rev 0 for GRAPH tokens, got %d", rev)
+		}
+		switch token {
+		case "TOKsrc":
+			return "real/src.go", true
+		case "TOKdst":
+			return "real/dst.go", true
+		}
+		return "", false
+	}
+	var buf bytes.Buffer
+	if err := renderGraphHuman(&buf, payload, unmask); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "real/src.go:1-9") || !strings.Contains(out, "real/dst.go:3-7") {
+		t.Errorf("expected unmasked src/dst paths, got %q", out)
+	}
+	if strings.Contains(out, "TOK") {
+		t.Errorf("raw tokens leaked into unmasked output: %q", out)
+	}
+}
+
+func TestRenderGraphHuman_UnmaskMissFallsBackToToken(t *testing.T) {
+	payload := mustJSON(t, map[string]any{
+		"edges": []any{
+			map[string]any{
+				"edge":       map[string]any{"kind": "calls"},
+				"src":        map[string]any{"path_token": "TOKsrc", "line_start": 1, "line_end": 9},
+				"dst":        map[string]any{"path_token": "TOKdst", "line_start": 3, "line_end": 7},
+				"confidence": 0.9, "resolution": "heuristic", "count": 1,
+			},
+		},
+	})
+	// An unmask that resolves nothing (e.g. file not checked out locally) must
+	// leave the raw token visible rather than dropping the path.
+	unmask := func(token string, rev int) (string, bool) { return "", false }
+	var buf bytes.Buffer
+	if err := renderGraphHuman(&buf, payload, unmask); err != nil {
+		t.Fatal(err)
+	}
+	if out := buf.String(); !strings.Contains(out, "TOKsrc:1-9") || !strings.Contains(out, "TOKdst:3-7") {
+		t.Errorf("expected raw tokens on unmask miss, got %q", out)
+	}
+}
+
+func TestRenderQueryHuman_Unmask(t *testing.T) {
+	payload := mustJSON(t, map[string]any{
+		"freshness":      "fresh",
+		"searched_repos": []string{"r1"},
+		"mask_key_rev":   3,
+		"results": []any{
+			map[string]any{"repo_id": "r1", "path_token": "TOK", "line_start": 1, "line_end": 9, "score": 0.5, "content_kind": "code"},
+		},
+	})
+	unmask := func(token string, rev int) (string, bool) {
+		if token == "TOK" && rev == 3 {
+			return "real/path.go", true
+		}
+		return "", false
+	}
+	var buf bytes.Buffer
+	if err := renderQueryHuman(&buf, payload, unmask); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "real/path.go:1-9") {
+		t.Errorf("expected unmasked path with the envelope's mask_key_rev, got %q", out)
 	}
 }
 

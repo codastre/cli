@@ -40,6 +40,12 @@ Reading confidence:
     confidence (>=0.9 near-certain, 0.5-0.9 plausible, <0.5 weak).
 Human output flags hypotheses with [hypothesis]; use --json for raw edges.
 
+Paths: src/dst are path_tokens (cleartext unless the repo uses HMAC masking).
+For an HMAC-masked repo, human output unmasks them back to real paths using the
+local checkout + masking key (best-effort; tokens for files not checked out
+locally stay masked). Pass --no-unmask to skip it, or --json for raw edges
+(always masked).
+
 Examples:
   codastre graph processPayment                         # this repo, outbound, depth 1
   codastre graph processPayment --direction inbound     # who calls it
@@ -61,6 +67,7 @@ var (
 	graphDirection string
 	graphJSON      bool
 	graphFormat    string
+	graphNoUnmask  bool
 )
 
 func init() {
@@ -75,6 +82,7 @@ func init() {
 	f.StringVar(&graphDirection, "direction", "outbound", "Traversal direction: outbound | inbound")
 	f.BoolVar(&graphJSON, "json", false, "Emit the raw JSON envelope instead of human output")
 	f.StringVar(&graphFormat, "format", "human", "Output format: human | json")
+	f.BoolVar(&graphNoUnmask, "no-unmask", false, "Show raw masked path_tokens; skip unmasking to real paths")
 	rootCmd.AddCommand(graphCmd)
 }
 
@@ -119,7 +127,11 @@ func runGraph(cmd *cobra.Command, args []string) error {
 		return printJSON(cmd.OutOrStdout(), payload)
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "target: %s\n", tgt.describe())
-	return renderGraphHuman(cmd.OutOrStdout(), payload)
+	var unmask func(pathToken string, maskKeyRev int) (string, bool)
+	if !graphNoUnmask {
+		unmask = cwdUnmask(graphServerURL, apiKey)
+	}
+	return renderGraphHuman(cmd.OutOrStdout(), payload, unmask)
 }
 
 // graphErrorHint augments known tool errors with an actionable next step.

@@ -94,11 +94,13 @@ func fetchMaskKey(
 	return key, ok, nil
 }
 
-// queryUnmask builds an UnmaskPath for one-shot `codastre query` runs, scoped to
-// the CWD's repository. It is a best-effort display enhancement: any setup
-// failure (no keychain, not in a repo, repo unmasked) yields nil and the caller
-// falls back to showing raw path_tokens.
-func queryUnmask(apiKey string) func(pathToken string, maskKeyRev int) (string, bool) {
+// cwdUnmask builds an UnmaskPath for one-shot `codastre query` / `codastre graph`
+// runs, scoped to the CWD's repository. It is a best-effort display enhancement:
+// any setup failure (no keychain, not in a repo, repo unmasked) yields nil and
+// the caller falls back to showing raw path_tokens. setupUnmask itself returns
+// nil when the repo's masking_scheme != hmac, so we only build the (cost-bearing)
+// reverse map when unmasking is actually needed.
+func cwdUnmask(serverURL, apiKey string) func(pathToken string, maskKeyRev int) (string, bool) {
 	store, _, err := keychain.Open()
 	if err != nil {
 		return nil
@@ -107,5 +109,5 @@ func queryUnmask(apiKey string) func(pathToken string, maskKeyRev int) (string, 
 	if err != nil {
 		return nil
 	}
-	return setupUnmask(queryServerURL, apiKey, repoRoot, store)
+	return setupUnmask(serverURL, apiKey, repoRoot, store)
 }
