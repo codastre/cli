@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -57,6 +58,25 @@ func runDoctor(cmd *cobra.Command, _ []string) {
 			findings = append(findings, finding{label: "auth", ok: authOK, detail: authDetail})
 		} else {
 			findings = append(findings, finding{label: "auth", ok: false, detail: "skipped (server unreachable)"})
+		}
+	}
+
+	// 2b. GitHub App availability (advisory): one-click private/org connect needs a
+	// deployment-level App. Operator-fixable, so warn rather than error; skip if the
+	// probe can't run (no key / server down / request error) to avoid noise.
+	if serverOK && apiKey != "" {
+		if configured, ok := checkGitHubApp(doctorServerURL, apiKey); ok {
+			detail := ""
+			if !configured {
+				detail = "not configured — one-click private/org connect unavailable " +
+					"(ask an operator to run `codastre-admin github-app-key`)"
+			}
+			findings = append(findings, finding{
+				label:   "github app",
+				ok:      configured,
+				warning: true,
+				detail:  detail,
+			})
 		}
 	}
 
@@ -169,6 +189,32 @@ func checkAuth(serverURL, apiKey string) (bool, string) {
 		return false, "API key invalid"
 	}
 	return true, ""
+}
+
+// checkGitHubApp reports whether a GitHub App is configured on the deployment.
+// The second return is false when the probe couldn't run (so the caller skips the
+// finding rather than reporting a false negative).
+func checkGitHubApp(serverURL, apiKey string) (configured bool, ok bool) {
+	req, err := http.NewRequest(http.MethodGet, serverURL+"/v1/github/app-config", nil)
+	if err != nil {
+		return false, false
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, false
+	}
+	var body struct {
+		Configured bool `json:"configured"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return false, false
+	}
+	return body.Configured, true
 }
 
 func getRemoteURL(repoPath string) (string, error) {
