@@ -1,12 +1,16 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/codastre/cli/internal/git"
 	"github.com/codastre/cli/internal/keychain"
+	"github.com/codastre/cli/internal/mcpclient"
 )
 
 // resolveAPIKey returns the API key for serverURL using the precedence:
@@ -38,24 +42,36 @@ func resolveAPIKey(serverURL, keyFlag string) (apiKey, warn string, err error) {
 	return key, warn, nil
 }
 
-// autoTarget derives the canonical repo_url ("host/owner/repo") for the current
-// working directory's git repository. It returns "" when the CWD is not inside a
-// git repo or has no usable `origin` remote — the caller then falls back to a
-// federated search across all visible repos.
-func autoTarget() string {
+// autoTargets derives the canonical repo_url candidates ("host/owner/repo") for
+// the current working directory's git repository — one per configured remote,
+// in priority order (origin, upstream, then the rest), normalized and deduped.
+// It returns nil when the CWD is not inside a git repo or has no usable remote —
+// the caller then falls back to a federated search across all visible repos.
+//
+// A clone often carries several remotes that mirror the same repo (e.g. origin
+// and upstream); only one is registered with the server. The first candidate is
+// the primary target; the rest are tried in turn when the server reports
+// REPO_NOT_INDEXED for the primary.
+func autoTargets() []string {
 	root, err := findGitRoot(".")
 	if err != nil {
-		return ""
+		return nil
 	}
-	remote, err := getRemoteURL(root)
+	remotes, err := remoteURLs(root)
 	if err != nil {
-		return ""
+		return nil
 	}
-	normalized, err := git.Normalize(remote)
-	if err != nil {
-		return ""
+	var out []string
+	seen := make(map[string]bool)
+	for _, remote := range remotes {
+		normalized, err := git.Normalize(remote)
+		if err != nil || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		out = append(out, normalized)
 	}
-	return normalized
+	return out
 }
 
 // target captures the resolved search scope (docs/mcp-index-free-access.md).
@@ -63,6 +79,11 @@ type target struct {
 	indexID   string // a single index by id
 	repoURL   string // a specific repo by URL
 	federated bool   // all visible repos
+
+	// fallbacks holds additional repo_url candidates (auto mode only). When the
+	// server reports REPO_NOT_INDEXED for repoURL, callWithRepoFallback retries
+	// these in order before surfacing the error.
+	fallbacks []string
 }
 
 // describe returns a one-line summary of the resolved mode for human output.
@@ -122,9 +143,43 @@ func resolveTarget(indexID, repoURL string, all bool) (target, error) {
 	case all:
 		return target{federated: true}, nil
 	default:
-		if url := autoTarget(); url != "" {
-			return target{repoURL: url}, nil
+		// No explicit target: resolve from the CWD repo's remotes. The first is the
+		// primary; the rest are retried only if the primary is not indexed. An
+		// explicit --repo-url never gets this fallback — it targets exactly one repo.
+		if cands := autoTargets(); len(cands) > 0 {
+			return target{repoURL: cands[0], fallbacks: cands[1:]}, nil
 		}
 		return target{federated: true}, nil
+	}
+}
+
+// callWithRepoFallback issues an MCP tool call for tgt and returns the payload
+// together with the target that actually resolved. In auto multi-remote mode
+// (tgt.fallbacks non-empty) it retries each remaining repo_url candidate when the
+// server reports REPO_NOT_INDEXED, so a CWD whose `origin` is unregistered still
+// resolves through another remote (e.g. upstream). Any other error, or an
+// exhausted candidate list, is returned as-is from the last attempt.
+func callWithRepoFallback(
+	ctx context.Context,
+	cfg mcpclient.Config,
+	tool string,
+	toolArgs map[string]any,
+	tgt target,
+) (json.RawMessage, target, error) {
+	cur := tgt
+	remaining := tgt.fallbacks
+	for {
+		cur.apply(toolArgs)
+		payload, err := mcpclient.Call(ctx, cfg, tool, toolArgs)
+		if err == nil {
+			return payload, cur, nil
+		}
+		var te *mcpclient.ToolError
+		if errors.As(err, &te) && te.Code == "REPO_NOT_INDEXED" && len(remaining) > 0 {
+			cur = target{repoURL: remaining[0]}
+			remaining = remaining[1:]
+			continue
+		}
+		return nil, cur, err
 	}
 }

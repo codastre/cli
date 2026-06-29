@@ -23,8 +23,10 @@ This is the CLI equivalent of the MCP GRAPH tool. The seed is a symbol name
   --all               seed the symbol across all visible repos
 
 With no target flag:
-  • inside a git repo with an 'origin' remote → traverse THAT repo
-  • otherwise                                  → seed across all visible repos
+  • inside a git repo → traverse THAT repo, resolved from its remotes (origin
+    first, then upstream, then the rest); if the first isn't indexed the next
+    is tried, so a clone whose 'origin' is unregistered still resolves.
+  • otherwise → seed across all visible repos
 
 Direction:
   --direction outbound  edges FROM the seed ("what does A call / produce")
@@ -114,7 +116,6 @@ func runGraph(cmd *cobra.Command, args []string) error {
 		"depth":           graphDepth,
 		"direction":       graphDirection,
 	}
-	tgt.apply(toolArgs)
 	if graphKind != "" {
 		toolArgs["kind"] = graphKind
 	}
@@ -122,7 +123,8 @@ func runGraph(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
 	defer cancel()
 
-	payload, err := mcpclient.Call(ctx, mcpclient.Config{ServerURL: graphServerURL, APIKey: apiKey}, "GRAPH", toolArgs)
+	cfg := mcpclient.Config{ServerURL: graphServerURL, APIKey: apiKey}
+	payload, tgt, err := callWithRepoFallback(ctx, cfg, "GRAPH", toolArgs, tgt)
 	if err != nil {
 		return graphErrorHint(err)
 	}

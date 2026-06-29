@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/codastre/cli/internal/git"
@@ -223,4 +224,50 @@ func getRemoteURL(repoPath string) (string, error) {
 		return "", fmt.Errorf("no remote 'origin' configured")
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// remoteURLs returns the fetch URLs of every configured remote, ordered with the
+// conventional upstreams first — origin, then upstream — followed by the rest in
+// git's stable (alphabetical) order. A clone may carry several remotes pointing at
+// mirrors of the same repo (e.g. origin and upstream); only one is registered with
+// the server, so auto-target resolution tries them in this order. Errors when the
+// repo has no remotes.
+func remoteURLs(repoPath string) ([]string, error) {
+	out, err := exec.Command("git", "-C", repoPath, "remote").Output()
+	if err != nil {
+		return nil, fmt.Errorf("list remotes: %w", err)
+	}
+	names := strings.Fields(string(out))
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no remotes configured")
+	}
+	sort.SliceStable(names, func(i, j int) bool {
+		return remoteRank(names[i]) < remoteRank(names[j])
+	})
+	var urls []string
+	for _, name := range names {
+		u, err := exec.Command("git", "-C", repoPath, "remote", "get-url", name).Output()
+		if err != nil {
+			continue
+		}
+		if s := strings.TrimSpace(string(u)); s != "" {
+			urls = append(urls, s)
+		}
+	}
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("no remote URLs configured")
+	}
+	return urls, nil
+}
+
+// remoteRank orders remotes so the conventional upstream names are tried first.
+func remoteRank(name string) int {
+	switch name {
+	case "origin":
+		return 0
+	case "upstream":
+		return 1
+	default:
+		return 2
+	}
 }

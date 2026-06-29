@@ -23,8 +23,10 @@ the flags you pass and your current directory:
   --all               search every repo you can see, merged
 
 With no target flag:
-  • inside a git repo with an 'origin' remote → search THAT repo
-  • otherwise (no repo / no origin)           → search every repo you can see
+  • inside a git repo → search THAT repo, resolved from its remotes (origin
+    first, then upstream, then the rest); if the first isn't indexed the next
+    is tried, so a clone whose 'origin' is unregistered still resolves.
+  • otherwise (no repo / no remotes) → search every repo you can see
 
 Reading the output:
   • status "ok" with an empty result list means "searched, nothing matched" —
@@ -113,7 +115,6 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	}
 
 	toolArgs := map[string]any{"query_text": args[0], "top_k": queryTopK}
-	tgt.apply(toolArgs)
 	if queryRef != "" {
 		toolArgs["ref"] = queryRef
 	}
@@ -131,7 +132,8 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
 	defer cancel()
 
-	payload, err := mcpclient.Call(ctx, mcpclient.Config{ServerURL: queryServerURL, APIKey: apiKey}, "QUERY", toolArgs)
+	cfg := mcpclient.Config{ServerURL: queryServerURL, APIKey: apiKey}
+	payload, tgt, err := callWithRepoFallback(ctx, cfg, "QUERY", toolArgs, tgt)
 	if err != nil {
 		return queryErrorHint(err)
 	}
