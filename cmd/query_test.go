@@ -119,6 +119,40 @@ func TestRenderQueryHuman_MultiRepo(t *testing.T) {
 	}
 }
 
+func TestRenderQueryHuman_DocumentTitle(t *testing.T) {
+	payload := mustJSON(t, map[string]any{
+		"status":         "ok",
+		"freshness":      "fresh",
+		"searched_repos": []string{"c1"},
+		"sync_job_id":    nil,
+		"results": []any{
+			map[string]any{
+				"repo_id": "c1", "path_token": "38e51cdf-doc-id", "line_start": 0, "line_end": 0,
+				"score": 1.0, "kind": "runbook", "symbol_name": nil, "content_kind": "runbook",
+				"title": "kafka-consumer-lag.md", "source_ref": "https://wiki/kafka-lag",
+			},
+		},
+	})
+
+	var buf bytes.Buffer
+	if err := renderQueryHuman(&buf, payload, nil); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "kafka-consumer-lag.md") || !strings.Contains(out, "(runbook)") {
+		t.Errorf("expected title and content_kind on the line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "[https://wiki/kafka-lag]") {
+		t.Errorf("expected source_ref shown when it differs from title, got:\n%s", out)
+	}
+	if !strings.Contains(out, "doc 38e51cdf-doc-id") {
+		t.Errorf("expected doc-id retained for content fetch, got:\n%s", out)
+	}
+	if strings.Contains(out, "38e51cdf-doc-id:0-0") {
+		t.Errorf("doc hit must not render the code-style path:lines form, got:\n%s", out)
+	}
+}
+
 func TestRenderQueryHuman_Empty(t *testing.T) {
 	payload := mustJSON(t, map[string]any{
 		"status":         "ok",

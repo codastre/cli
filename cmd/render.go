@@ -30,6 +30,11 @@ type queryResult struct {
 	Kind        string  `json:"kind"`
 	SymbolName  *string `json:"symbol_name"`
 	ContentKind string  `json:"content_kind"`
+	// Document-corpus enrichment: a human title and the source ref (filename or
+	// URL). Empty for code chunks. When present the human renderer leads with the
+	// title instead of the opaque doc-id path_token.
+	Title     *string `json:"title"`
+	SourceRef *string `json:"source_ref"`
 }
 
 // repoLabel resolves a repo_id to its remote_url for display, falling back to
@@ -66,10 +71,6 @@ func renderQueryHuman(
 	}
 
 	for i, r := range env.Results {
-		sym := ""
-		if r.SymbolName != nil && *r.SymbolName != "" {
-			sym = "  " + *r.SymbolName
-		}
 		path := r.PathToken
 		if unmask != nil {
 			if real, ok := unmask(r.PathToken, env.MaskKeyRev); ok {
@@ -77,6 +78,24 @@ func renderQueryHuman(
 			}
 		}
 		fmt.Fprintf(w, "%2d. [%.3f] %s\n", i+1, r.Score, env.repoLabel(r.RepoID))
+
+		// Document hit: lead with the title (the opaque path_token is the doc-id,
+		// kept on a detail line as the handle for the content endpoint).
+		if r.Title != nil && *r.Title != "" {
+			label := *r.Title
+			if r.SourceRef != nil && *r.SourceRef != "" && *r.SourceRef != *r.Title {
+				label += "  [" + *r.SourceRef + "]"
+			}
+			fmt.Fprintf(w, "    %s  (%s)\n", label, r.ContentKind)
+			fmt.Fprintf(w, "    doc %s\n", path)
+			continue
+		}
+
+		// Code hit: path:lines and the symbol name.
+		sym := ""
+		if r.SymbolName != nil && *r.SymbolName != "" {
+			sym = "  " + *r.SymbolName
+		}
 		fmt.Fprintf(w, "    %s:%d-%d%s  (%s)\n", path, r.LineStart, r.LineEnd, sym, r.ContentKind)
 	}
 	return nil

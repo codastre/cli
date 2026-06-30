@@ -53,6 +53,8 @@ Examples:
   codastre query "stripe webhook handler" --all            # all visible repos
   codastre query "auth middleware" --repo-url github.com/acme/api
   codastre query "retry policy" --index-id 1f2e... --top-k 20
+  codastre query "consumers lagging" --content-kinds runbook            # find the runbook
+  codastre query "page fired" --alert-ids KAFKA-1024 --content-kinds runbook  # exact alert lookup
   codastre query "parse config" --language go --json       # raw envelope for agents`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
@@ -70,6 +72,8 @@ var (
 	queryLanguage     string
 	queryPathPrefix   string
 	queryContentKinds []string
+	queryAlertIDs     []string
+	queryErrorCodes   []string
 	queryJSON         bool
 	queryFormat       string
 	queryNoUnmask     bool
@@ -88,6 +92,8 @@ func init() {
 	f.StringVar(&queryLanguage, "language", "", "Filter by language")
 	f.StringVar(&queryPathPrefix, "path-prefix", "", "Filter by path prefix")
 	f.StringSliceVar(&queryContentKinds, "content-kinds", nil, "Filter by content kinds (repeatable)")
+	f.StringSliceVar(&queryAlertIDs, "alert-ids", nil, "Exact-match runbooks carrying these alert ids, e.g. KAFKA-1024 (repeatable)")
+	f.StringSliceVar(&queryErrorCodes, "error-codes", nil, "Exact-match runbooks carrying these error codes, e.g. ERR_CONSUMER_LAG (repeatable)")
 	f.BoolVar(&queryJSON, "json", false, "Emit the raw JSON envelope instead of human output")
 	f.StringVar(&queryFormat, "format", "human", "Output format: human | json")
 	f.BoolVar(&queryNoUnmask, "no-unmask", false, "Show raw masked path_tokens; skip unmasking to real paths")
@@ -126,6 +132,12 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	}
 	if len(queryContentKinds) > 0 {
 		toolArgs["content_kinds"] = queryContentKinds
+	}
+	if len(queryAlertIDs) > 0 {
+		toolArgs["alert_ids"] = queryAlertIDs
+	}
+	if len(queryErrorCodes) > 0 {
+		toolArgs["error_codes"] = queryErrorCodes
 	}
 
 	// Server caps QUERY at 10s; allow margin for transport.
