@@ -81,6 +81,24 @@ func runDoctor(cmd *cobra.Command, _ []string) {
 		}
 	}
 
+	// 2c. Enabled languages (informational): reports the deployment-wide set of
+	// languages with full chunking/graph support. Never fails the run; skip the
+	// finding if the probe can't run to avoid noise.
+	if serverOK && apiKey != "" {
+		if langs, ok := checkLanguages(doctorServerURL, apiKey); ok {
+			detail := "none enabled"
+			if len(langs) > 0 {
+				detail = "enabled: " + strings.Join(langs, ", ")
+			}
+			findings = append(findings, finding{
+				label:   "languages",
+				ok:      true,
+				warning: true,
+				detail:  detail,
+			})
+		}
+	}
+
 	// 3. Keychain backend.
 	if storeErr == nil {
 		if isFallback {
@@ -216,6 +234,33 @@ func checkGitHubApp(serverURL, apiKey string) (configured bool, ok bool) {
 		return false, false
 	}
 	return body.Configured, true
+}
+
+// checkLanguages reports the deployment-wide set of enabled languages from the
+// tenant-visible security-posture endpoint. The second return is false when the
+// probe couldn't run (so the caller skips the finding rather than reporting a
+// false negative).
+func checkLanguages(serverURL, apiKey string) (enabledLanguages []string, ok bool) {
+	req, err := http.NewRequest(http.MethodGet, serverURL+"/v1/system/security-posture", nil)
+	if err != nil {
+		return nil, false
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var body struct {
+		EnabledLanguages []string `json:"enabled_languages"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, false
+	}
+	return body.EnabledLanguages, true
 }
 
 func getRemoteURL(repoPath string) (string, error) {
