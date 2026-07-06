@@ -14,6 +14,20 @@ import (
 
 const serviceName = "codastre"
 
+// osKeychainBackends are the persistent OS-native secret stores we treat as
+// "secure". We list them explicitly rather than letting keyring auto-select,
+// because with no AllowedBackends the library silently falls through to the
+// file backend — but without a FileDir, so Open() succeeds and the first Set()
+// fails with "No directory provided for file keyring". Restricting to these
+// makes keyring.Open error when none is available, so we take the explicit file
+// fallback below (which sets FileDir and reports isFallback=true).
+var osKeychainBackends = []keyring.BackendType{
+	keyring.KeychainBackend,      // macOS
+	keyring.SecretServiceBackend, // Linux (GNOME/libsecret via D-Bus)
+	keyring.KWalletBackend,       // Linux (KDE)
+	keyring.WinCredBackend,       // Windows
+}
+
 // Store wraps the chosen keyring backend.
 type Store struct {
 	ring       keyring.Keyring
@@ -25,6 +39,7 @@ type Store struct {
 func Open() (*Store, bool, error) {
 	ring, err := keyring.Open(keyring.Config{
 		ServiceName:                    serviceName,
+		AllowedBackends:                osKeychainBackends,
 		KeychainTrustApplication:       true,
 		KeychainAccessibleWhenUnlocked: true,
 	})
