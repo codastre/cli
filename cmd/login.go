@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codastre/cli/internal/config"
 	"github.com/codastre/cli/internal/keychain"
 	"github.com/spf13/cobra"
 )
@@ -114,7 +115,13 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		if err := store.SetAPIKey(host, apiKey); err != nil {
 			return fmt.Errorf("store API key: %w", err)
 		}
+		// Remember the server so subsequent commands default to it — a
+		// self-hosted deployment is configured once, not per-invocation.
+		if err := config.SetServerURL(serverURL); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not save server URL to config: %v\n", err)
+		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Logged in. API key stored for %s\n", host)
+		fmt.Fprintf(cmd.OutOrStdout(), "Server %s saved as default; other commands no longer need --server.\n", serverURL)
 		return nil
 	}
 
