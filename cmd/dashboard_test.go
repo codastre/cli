@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestHandoffHandlerServesKeyOnceWithMatchingNonce(t *testing.T) {
@@ -44,9 +45,11 @@ func TestHandoffHandlerServesKeyOnceWithMatchingNonce(t *testing.T) {
 	if body.APIKey != "secret-key" {
 		t.Fatalf("api_key: got %q", body.APIKey)
 	}
+	// The handler flushes the body before signalling done, so http.Get can
+	// return before done <- nil runs; block (with a timeout) rather than race it.
 	select {
 	case <-done:
-	default:
+	case <-time.After(2 * time.Second):
 		t.Fatal("expected done signal after serving the key")
 	}
 
