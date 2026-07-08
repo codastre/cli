@@ -7,7 +7,7 @@ import (
 )
 
 // TestPrimaryOpenErrorsWithoutOSKeychain proves the core fix: when none of the
-// configured OS secret stores is available (the Qonto tooling host), the
+// configured OS secret stores is available (a tenant tooling host), the
 // primary keyring.Open returns an error, so Open() falls through to the file
 // backend instead of silently returning a dir-less file keyring. We can't
 // uninstall the macOS Keychain, so we assert the mechanism directly: a config
@@ -37,10 +37,10 @@ func TestFileFallbackRoundTrips(t *testing.T) {
 		t.Fatalf("open file keyring: %v", err)
 	}
 	s := &Store{ring: ring, isFallback: true}
-	if err := s.SetAPIKey("codastre-api.tooling-production.qonto.co", "sk-repro"); err != nil {
+	if err := s.SetAPIKey("codastre-api.domain.com", "sk-repro"); err != nil {
 		t.Fatalf("SetAPIKey error: %v", err)
 	}
-	got, err := s.GetAPIKey("codastre-api.tooling-production.qonto.co")
+	got, err := s.GetAPIKey("codastre-api.domain.com")
 	if err != nil {
 		t.Fatalf("GetAPIKey error: %v", err)
 	}
