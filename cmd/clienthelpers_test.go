@@ -28,7 +28,7 @@ func initRepoWithRemotes(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	runGit(t, dir, "init")
-	runGit(t, dir, "remote", "add", "origin", "git@github.com:qonto-private/codastre.git")
+	runGit(t, dir, "remote", "add", "origin", "git@github.com:acme/codastre.git")
 	runGit(t, dir, "remote", "add", "upstream", "https://github.com/jflbr/codastre.git")
 	runGit(t, dir, "remote", "add", "source", "https://github.com/jflbr/codastre.git")
 	return dir
@@ -42,7 +42,7 @@ func TestRemoteURLs_Order(t *testing.T) {
 	}
 	// origin (rank 0), then upstream (rank 1), then the rest (source).
 	want := []string{
-		"git@github.com:qonto-private/codastre.git",
+		"git@github.com:acme/codastre.git",
 		"https://github.com/jflbr/codastre.git",
 		"https://github.com/jflbr/codastre.git",
 	}
@@ -70,7 +70,7 @@ func TestAutoTargets_NormalizeDedupOrder(t *testing.T) {
 
 	got := autoTargets()
 	// Both jflbr remotes collapse to one canonical URL; origin stays first.
-	want := []string{"github.com/qonto-private/codastre", "github.com/jflbr/codastre"}
+	want := []string{"github.com/acme/codastre", "github.com/jflbr/codastre"}
 	if len(got) != len(want) {
 		t.Fatalf("autoTargets = %v, want %v", got, want)
 	}
@@ -109,7 +109,7 @@ func TestResolveTarget_AutoCarriesRemoteFallbacks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tgt.repoURL != "github.com/qonto-private/codastre" {
+	if tgt.repoURL != "github.com/acme/codastre" {
 		t.Fatalf("primary repoURL = %q, want origin", tgt.repoURL)
 	}
 	if len(tgt.fallbacks) != 1 || tgt.fallbacks[0] != "github.com/jflbr/codastre" {
@@ -178,7 +178,7 @@ func TestCallWithRepoFallback_RetriesUntilIndexed(t *testing.T) {
 	defer srv.Close()
 
 	tgt := target{
-		repoURL:   "github.com/qonto-private/codastre",
+		repoURL:   "github.com/acme/codastre",
 		fallbacks: []string{"github.com/jflbr/codastre"},
 	}
 	cfg := mcpclient.Config{ServerURL: srv.URL, APIKey: "k"}
@@ -189,7 +189,7 @@ func TestCallWithRepoFallback_RetriesUntilIndexed(t *testing.T) {
 	if resolved.repoURL != "github.com/jflbr/codastre" {
 		t.Fatalf("resolved repoURL = %q, want the registered fallback", resolved.repoURL)
 	}
-	want := []string{"github.com/qonto-private/codastre", "github.com/jflbr/codastre"}
+	want := []string{"github.com/acme/codastre", "github.com/jflbr/codastre"}
 	if len(tried) != len(want) || tried[0] != want[0] || tried[1] != want[1] {
 		t.Fatalf("server saw repo_urls %v, want %v", tried, want)
 	}

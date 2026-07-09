@@ -35,6 +35,11 @@ Direction:
 Edge kinds (--kind): kafka, http, grpc, package, calls (omit for all). Prefer
 --depth 1 for kind=calls — busy functions fan out fast.
 
+Topic lookup (--topic, Kafka only): pass a topic literal instead of a seed to
+list every edge carrying it — src produces, dst consumes — answering "who
+produces/consumes topic T". Forces --kind kafka; the positional seed and
+--direction are ignored. Combine with --all to search every repo.
+
 Reading confidence:
   • cross-repo edges (kafka/http/grpc/package): resolution matters —
     'dynamic_unresolved' edges and confidence < 0.5 are hypotheses, not facts.
@@ -54,8 +59,9 @@ Examples:
   codastre graph processPayment                         # this repo, outbound, depth 1
   codastre graph processPayment --direction inbound     # who calls it
   codastre graph OrderCreated --kind kafka --all        # cross-repo producers/consumers
+  codastre graph --topic orders --all                   # who produces/consumes topic "orders"
   codastre graph chargeCard --kind calls --depth 2 --json`,
-	Args:         cobra.ExactArgs(1),
+	Args:         cobra.MaximumNArgs(1),
 	SilenceUsage: true,
 	RunE:         runGraph,
 }
@@ -67,6 +73,7 @@ var (
 	graphRepoURL   string
 	graphAll       bool
 	graphKind      string
+	graphTopic     string
 	graphDepth     int
 	graphDirection string
 	graphJSON      bool
@@ -83,6 +90,7 @@ func init() {
 	f.StringVar(&graphRepoURL, "repo-url", "", "Traverse a specific repo by URL")
 	f.BoolVar(&graphAll, "all", false, "Traverse across all visible repos")
 	f.StringVar(&graphKind, "kind", "", "Edge kind: kafka | http | grpc | package | calls (default all)")
+	f.StringVar(&graphTopic, "topic", "", "Kafka topic literal to look up (seed-free; forces --kind kafka)")
 	f.IntVar(&graphDepth, "depth", 1, "Traversal depth (1-3)")
 	f.StringVar(&graphDirection, "direction", "outbound", "Traversal direction: outbound | inbound")
 	f.BoolVar(&graphJSON, "json", false, "Emit the raw JSON envelope instead of human output")
@@ -96,6 +104,21 @@ func runGraph(cmd *cobra.Command, args []string) error {
 	asJSON, err := wantJSON(graphJSON, graphFormat)
 	if err != nil {
 		return err
+	}
+
+	// Seed vs topic mode. --topic is a seed-free Kafka lookup; otherwise a
+	// positional seed (symbol or chunk_id) is required.
+	seed := ""
+	if len(args) == 1 {
+		seed = args[0]
+	}
+	if graphTopic != "" {
+		if graphKind != "" && graphKind != "kafka" {
+			return fmt.Errorf("--topic is only supported with --kind kafka (got --kind %s)", graphKind)
+		}
+		graphKind = "kafka"
+	} else if seed == "" {
+		return errors.New("provide a symbol/chunk_id seed, or --topic <name> for a Kafka topic lookup")
 	}
 
 	tgt, err := resolveTarget(graphIndexID, graphRepoURL, graphAll)
@@ -112,12 +135,15 @@ func runGraph(cmd *cobra.Command, args []string) error {
 	}
 
 	toolArgs := map[string]any{
-		"chunk_or_symbol": args[0],
+		"chunk_or_symbol": seed,
 		"depth":           graphDepth,
 		"direction":       graphDirection,
 	}
 	if graphKind != "" {
 		toolArgs["kind"] = graphKind
+	}
+	if graphTopic != "" {
+		toolArgs["topic"] = graphTopic
 	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
