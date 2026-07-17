@@ -31,9 +31,14 @@ With no target flag:
 Direction:
   --direction outbound  edges FROM the seed ("what does A call / produce")
   --direction inbound   edges INTO the seed ("what calls A / consumes topic T")
+  --direction both      union of both walks, deduplicated ("everything
+                        connected to A" — callers AND callees)
 
-Edge kinds (--kind): kafka, http, grpc, package, calls (omit for all). Prefer
---depth 1 for kind=calls — busy functions fan out fast.
+Edge kinds (--kind): kafka, http, package, calls, extends, implements,
+imports (omit for all). Prefer --depth 1 for kind=calls — busy functions fan
+out fast. The structural kinds (extends/implements/imports) mostly point INTO
+a definition (subclass → base, importer → module); use --direction inbound or
+both when seeding from the definition.
 
 Topic lookup (--topic, Kafka only): pass a topic literal instead of a seed to
 list every edge carrying it — src produces, dst consumes — answering "who
@@ -41,10 +46,11 @@ produces/consumes topic T". Forces --kind kafka; the positional seed and
 --direction are ignored. Combine with --all to search every repo.
 
 Reading confidence:
-  • cross-repo edges (kafka/http/grpc/package): resolution matters —
+  • cross-repo edges (kafka/http/package): resolution matters —
     'dynamic_unresolved' edges and confidence < 0.5 are hypotheses, not facts.
-  • intra-repo 'calls' edges are always resolution=heuristic; trust the graded
-    confidence (>=0.9 near-certain, 0.5-0.9 plausible, <0.5 weak).
+  • intra-repo edges (calls/extends/implements/imports) are always
+    resolution=heuristic; trust the graded confidence (>=0.9 near-certain,
+    0.5-0.9 plausible, <0.5 weak).
 Human output flags hypotheses with [hypothesis]; use --json for raw edges.
 
 Paths: src/dst are path_tokens (cleartext unless the repo uses HMAC masking).
@@ -89,10 +95,10 @@ func init() {
 	f.StringVar(&graphIndexID, "index-id", "", "Traverse a single index by id")
 	f.StringVar(&graphRepoURL, "repo-url", "", "Traverse a specific repo by URL")
 	f.BoolVar(&graphAll, "all", false, "Traverse across all visible repos")
-	f.StringVar(&graphKind, "kind", "", "Edge kind: kafka | http | grpc | package | calls (default all)")
+	f.StringVar(&graphKind, "kind", "", "Edge kind: kafka | http | package | calls | extends | implements | imports (default all)")
 	f.StringVar(&graphTopic, "topic", "", "Kafka topic literal to look up (seed-free; forces --kind kafka)")
 	f.IntVar(&graphDepth, "depth", 1, "Traversal depth (1-3)")
-	f.StringVar(&graphDirection, "direction", "outbound", "Traversal direction: outbound | inbound")
+	f.StringVar(&graphDirection, "direction", "outbound", "Traversal direction: outbound | inbound | both")
 	f.BoolVar(&graphJSON, "json", false, "Emit the raw JSON envelope instead of human output")
 	f.StringVar(&graphFormat, "format", "human", "Output format: human | json")
 	f.BoolVar(&graphNoUnmask, "no-unmask", false, "Show raw masked path_tokens; skip unmasking to real paths")
