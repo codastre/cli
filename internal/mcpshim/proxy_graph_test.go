@@ -5,7 +5,10 @@ import (
 	"testing"
 )
 
-// graphResponse builds a minimal GRAPH response JSON with one edge.
+// graphResponse builds a minimal GRAPH response JSON with one edge, in the
+// compacted wire shape (corpus-hygiene plan API3): the edge object is canonical
+// for confidence/resolution (no item-level mirrors), and per-repo masking
+// metadata rides in the repos map.
 // If withEvidence is true, the edge includes an evidence object with file_path_token.
 func graphResponse(srcToken, dstToken string, withEvidence bool) []byte {
 	edge := map[string]any{
@@ -16,17 +19,18 @@ func graphResponse(srcToken, dstToken string, withEvidence bool) []byte {
 			"resolution": "resolved",
 		},
 		"src": map[string]any{
+			"repo_id":    "repo-src",
 			"path_token": srcToken,
 			"line_start": 1,
 			"line_end":   10,
 		},
 		"dst": map[string]any{
+			"repo_id":    "repo-dst",
 			"path_token": dstToken,
 			"line_start": 5,
 			"line_end":   15,
 		},
-		"confidence": 1.0,
-		"resolution": "resolved",
+		"count": 1,
 	}
 	if withEvidence {
 		edge["evidence"] = map[string]any{
@@ -35,6 +39,10 @@ func graphResponse(srcToken, dstToken string, withEvidence bool) []byte {
 	}
 	resp := map[string]any{
 		"edges": []any{edge},
+		"repos": map[string]any{
+			"repo-src": map[string]any{"masking_scheme": "hmac", "mask_key_rev": 2},
+			"repo-dst": map[string]any{"masking_scheme": "hmac", "mask_key_rev": 0},
+		},
 	}
 	b, _ := json.Marshal(resp)
 	return b
@@ -121,6 +129,36 @@ func TestEnrichGraphResponse_UnmaskedRepo(t *testing.T) {
 	}
 	if _, ok := extractString(t, got, "dst", "real_path"); ok {
 		t.Error("dst.real_path should not be present when UnmaskPath returns false")
+	}
+}
+
+// TestEnrichGraphResponse_PerRepoRev: each endpoint unmasks at its OWN repo's
+// mask_key_rev from the repos map (plan API3 — was hardcoded rev 0, which
+// wrong-unmasked rotated hmac repos). src is at rev 2, dst at rev 0; evidence
+// rides the src repo's rev.
+func TestEnrichGraphResponse_PerRepoRev(t *testing.T) {
+	revsSeen := map[string]int{}
+	cfg := Config{
+		UnmaskPath: func(tok string, rev int) (string, bool) {
+			revsSeen[tok] = rev
+			return "real/" + tok, true
+		},
+	}
+	input := graphResponse("srctok", "dsttok", true)
+	got := enrichGraphResponse(cfg, input)
+
+	if rev, ok := revsSeen["srctok"]; !ok || rev != 2 {
+		t.Errorf("src unmasked at rev %d (seen=%v), want 2", rev, revsSeen)
+	}
+	if rev, ok := revsSeen["dsttok"]; !ok || rev != 0 {
+		t.Errorf("dst unmasked at rev %d, want 0", rev)
+	}
+	// Evidence belongs to the src side → src repo's rev.
+	if rev, ok := revsSeen["abc123"]; !ok || rev != 2 {
+		t.Errorf("evidence unmasked at rev %d, want 2 (src repo's rev)", rev)
+	}
+	if real, ok := extractString(t, got, "src", "real_path"); !ok || real != "real/srctok" {
+		t.Errorf("src.real_path = %q", real)
 	}
 }
 

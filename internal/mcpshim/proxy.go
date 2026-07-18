@@ -304,7 +304,10 @@ func enrichQueryResponse(cfg Config, data []byte) []byte {
 //   - dst["path_token"] -> dst["real_path"] (if UnmaskPath returns ok)
 //   - evidence["file_path_token"] -> evidence["real_file_path"] (if present and ok)
 //
-// Uses maskKeyRev=0 since GRAPH responses carry no top-level mask_key_rev field.
+// Each endpoint is unmasked at its OWN repo's mask_key_rev, read from the
+// response's repos map ({repo_id: {masking_scheme, mask_key_rev}}). The old
+// hardcoded rev 0 silently wrong-unmasked rotated hmac repos (corpus-hygiene
+// plan API3); repos absent from the map (or a missing map) still fall back to 0.
 func enrichGraphResponse(cfg Config, data []byte) []byte {
 	if cfg.UnmaskPath == nil {
 		return data
@@ -319,47 +322,63 @@ func enrichGraphResponse(cfg Config, data []byte) []byte {
 		return data
 	}
 
-	// Each element is a graph_edge_result: {edge, src, dst, confidence, resolution, evidence?}
+	// Each element is a graph_edge_result: {edge, src, dst, count, evidence?}
 	var edges []map[string]json.RawMessage
 	if err := json.Unmarshal(edgesRaw, &edges); err != nil {
 		return data
 	}
 
-	const maskKeyRev = 0
+	// repo_id -> mask_key_rev from the envelope's repos map.
+	repoRevs := map[string]int{}
+	if reposRaw, ok := env["repos"]; ok {
+		var repos map[string]struct {
+			MaskKeyRev int `json:"mask_key_rev"`
+		}
+		if err := json.Unmarshal(reposRaw, &repos); err == nil {
+			for rid, info := range repos {
+				repoRevs[rid] = info.MaskKeyRev
+			}
+		}
+	}
+
+	// unmaskNode unmasks node[tokenField] into node[realField] at the node's
+	// own repo rev; returns the repo's rev for reuse (evidence rides src's repo).
+	unmaskNode := func(e map[string]json.RawMessage, key, tokenField, realField string) int {
+		rev := 0
+		raw, ok := e[key]
+		if !ok {
+			return rev
+		}
+		var node map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &node); err != nil {
+			return rev
+		}
+		if repoID, ok := unmarshalString(node["repo_id"]); ok {
+			if r, ok := repoRevs[repoID]; ok {
+				rev = r
+			}
+		}
+		if tok, ok := unmarshalString(node[tokenField]); ok {
+			if realPath, ok := cfg.UnmaskPath(tok, rev); ok {
+				node[realField], _ = json.Marshal(realPath)
+				e[key], _ = json.Marshal(node)
+			}
+		}
+		return rev
+	}
 
 	for i, e := range edges {
-		// Unmask src.path_token -> src.real_path
-		if srcRaw, ok := e["src"]; ok {
-			var src map[string]json.RawMessage
-			if err := json.Unmarshal(srcRaw, &src); err == nil {
-				if tok, ok := unmarshalString(src["path_token"]); ok {
-					if realPath, ok := cfg.UnmaskPath(tok, maskKeyRev); ok {
-						src["real_path"], _ = json.Marshal(realPath)
-						e["src"], _ = json.Marshal(src)
-					}
-				}
-			}
-		}
+		srcRev := unmaskNode(e, "src", "path_token", "real_path")
+		unmaskNode(e, "dst", "path_token", "real_path")
 
-		// Unmask dst.path_token -> dst.real_path
-		if dstRaw, ok := e["dst"]; ok {
-			var dst map[string]json.RawMessage
-			if err := json.Unmarshal(dstRaw, &dst); err == nil {
-				if tok, ok := unmarshalString(dst["path_token"]); ok {
-					if realPath, ok := cfg.UnmaskPath(tok, maskKeyRev); ok {
-						dst["real_path"], _ = json.Marshal(realPath)
-						e["dst"], _ = json.Marshal(dst)
-					}
-				}
-			}
-		}
-
-		// Unmask evidence.file_path_token -> evidence.real_file_path (optional field)
+		// Unmask evidence.file_path_token -> evidence.real_file_path (optional
+		// field). Evidence is the SRC side's call site, so it unmaskes at the
+		// src repo's rev.
 		if evRaw, ok := e["evidence"]; ok {
 			var ev map[string]json.RawMessage
 			if err := json.Unmarshal(evRaw, &ev); err == nil {
 				if tok, ok := unmarshalString(ev["file_path_token"]); ok {
-					if realPath, ok := cfg.UnmaskPath(tok, maskKeyRev); ok {
+					if realPath, ok := cfg.UnmaskPath(tok, srcRev); ok {
 						ev["real_file_path"], _ = json.Marshal(realPath)
 						e["evidence"], _ = json.Marshal(ev)
 					}
