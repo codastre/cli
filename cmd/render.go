@@ -9,12 +9,24 @@ import (
 // ── QUERY envelope ──────────────────────────────────────────────────────────
 
 type queryEnvelope struct {
-	Freshness     string              `json:"freshness"`
-	SearchedRepos []string            `json:"searched_repos"`
-	Repos         map[string]repoInfo `json:"repos"`
-	SyncJobID     *string             `json:"sync_job_id"`
-	MaskKeyRev    int                 `json:"mask_key_rev"`
-	Results       []queryResult       `json:"results"`
+	Freshness     string   `json:"freshness"`
+	SearchedRepos []string `json:"searched_repos"`
+	// Federated responses scope the envelope to result repos and report the
+	// searched count here instead of the full searched_repos list (API2).
+	SearchedRepoCount *int                `json:"searched_repo_count"`
+	Repos             map[string]repoInfo `json:"repos"`
+	SyncJobID         *string             `json:"sync_job_id"`
+	MaskKeyRev        int                 `json:"mask_key_rev"`
+	Results           []queryResult       `json:"results"`
+}
+
+// searchedCount is the number of repos searched: the scoped federated count
+// when present, else the length of the (single-repo / full) searched_repos list.
+func (e queryEnvelope) searchedCount() int {
+	if e.SearchedRepoCount != nil {
+		return *e.SearchedRepoCount
+	}
+	return len(e.SearchedRepos)
 }
 
 type repoInfo struct {
@@ -59,7 +71,7 @@ func renderQueryHuman(
 		return fmt.Errorf("decode QUERY response: %w", err)
 	}
 
-	fmt.Fprintf(w, "freshness: %s · searched %d repo(s)\n", env.Freshness, len(env.SearchedRepos))
+	fmt.Fprintf(w, "freshness: %s · searched %d repo(s)\n", env.Freshness, env.searchedCount())
 	if env.SyncJobID != nil && *env.SyncJobID != "" {
 		fmt.Fprintf(w, "sync in progress: job %s\n", *env.SyncJobID)
 	}
@@ -108,16 +120,43 @@ type graphEnvelope struct {
 }
 
 type graphEdge struct {
-	Edge       edgeMeta `json:"edge"`
-	Src        edgeNode `json:"src"`
-	Dst        edgeNode `json:"dst"`
-	Confidence float64  `json:"confidence"`
-	Resolution string   `json:"resolution"`
-	Count      int      `json:"count"`
+	Edge edgeMeta `json:"edge"`
+	Src  edgeNode `json:"src"`
+	Dst  edgeNode `json:"dst"`
+	// Legacy item-level mirrors, emitted by servers predating the corpus-
+	// hygiene API3 compaction. The edge object is canonical; these are only a
+	// fallback so the CLI renders old servers' responses correctly.
+	LegacyConfidence *float64 `json:"confidence"`
+	LegacyResolution string   `json:"resolution"`
+	Count            int      `json:"count"`
+}
+
+// confidence returns the canonical edge.confidence, falling back to the legacy
+// item-level mirror (pre-API3 servers). Reading only the removed mirror is the
+// bug that rendered every edge as "conf 0.00 [hypothesis]".
+func (e graphEdge) confidence() float64 {
+	if e.Edge.Confidence != nil {
+		return *e.Edge.Confidence
+	}
+	if e.LegacyConfidence != nil {
+		return *e.LegacyConfidence
+	}
+	return 0
+}
+
+// resolution returns the canonical edge.resolution, falling back to the legacy
+// item-level mirror.
+func (e graphEdge) resolution() string {
+	if e.Edge.Resolution != "" {
+		return e.Edge.Resolution
+	}
+	return e.LegacyResolution
 }
 
 type edgeMeta struct {
-	Kind string `json:"kind"`
+	Kind       string   `json:"kind"`
+	Confidence *float64 `json:"confidence"`
+	Resolution string   `json:"resolution"`
 }
 
 type edgeNode struct {
@@ -170,7 +209,7 @@ func renderGraphHuman(
 		hint := ""
 		// Hypotheses, not facts (design §10.1): low confidence or unresolved
 		// dynamic edges await human curation.
-		if e.Confidence < 0.5 || e.Resolution == "dynamic_unresolved" {
+		if e.confidence() < 0.5 || e.resolution() == "dynamic_unresolved" {
 			hint = "  [hypothesis]"
 		}
 		// count > 1: several call sites between the same chunks, collapsed
@@ -180,7 +219,7 @@ func renderGraphHuman(
 			mult = fmt.Sprintf("  (×%d)", e.Count)
 		}
 		fmt.Fprintf(w, " • %-8s %s → %s%s   conf %.2f  %s%s\n",
-			kind, e.Src.ref(unmask), e.Dst.ref(unmask), mult, e.Confidence, e.Resolution, hint)
+			kind, e.Src.ref(unmask), e.Dst.ref(unmask), mult, e.confidence(), e.resolution(), hint)
 	}
 	return nil
 }
