@@ -162,6 +162,30 @@ func TestEnrichGraphResponse_PerRepoRev(t *testing.T) {
 	}
 }
 
+// TestEnrichGraphResponse_NoneSchemeIdentity: a `none`-scheme (cleartext) repo
+// has NO UnmaskPath, but RepoScheme reports "none" — the proxy must identity-map
+// path_token → real_path (the token already IS the real path) instead of leaving
+// the edge unenriched. Regression guard for the "snippets/paths starved on
+// cleartext repos" fix.
+func TestEnrichGraphResponse_NoneSchemeIdentity(t *testing.T) {
+	cfg := Config{
+		// no UnmaskPath — cleartext repos have no key/unmasker
+		RepoScheme: func(repoID string) (string, bool) { return "none", true },
+	}
+	input := graphResponse("app/events.py", "app/consumer.py", true)
+	got := enrichGraphResponse(cfg, input)
+
+	if real, ok := extractString(t, got, "src", "real_path"); !ok || real != "app/events.py" {
+		t.Errorf("src.real_path = %q, ok=%v; want identity %q", real, ok, "app/events.py")
+	}
+	if real, ok := extractString(t, got, "dst", "real_path"); !ok || real != "app/consumer.py" {
+		t.Errorf("dst.real_path = %q, ok=%v; want identity %q", real, ok, "app/consumer.py")
+	}
+	if real, ok := extractString(t, got, "evidence", "real_file_path"); !ok || real != "abc123" {
+		t.Errorf("evidence.real_file_path = %q, ok=%v; want identity %q", real, ok, "abc123")
+	}
+}
+
 // TestEnrichGraphResponse_EvidenceUnmask: edge has evidence.file_path_token;
 // UnmaskPath succeeds; evidence.real_file_path should be set.
 func TestEnrichGraphResponse_EvidenceUnmask(t *testing.T) {

@@ -2,6 +2,8 @@ package mcpshim
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -173,6 +175,55 @@ func TestEnrichQueryResponse_ScopedCompactedEnvelope(t *testing.T) {
 	}
 	if string(enriched["filter_matched"]) != "true" {
 		t.Errorf("filter_matched round-trip = %s", enriched["filter_matched"])
+	}
+}
+
+// TestEnrichQueryResponse_NoneSchemeHydratesFromCheckout: a `none`-scheme
+// (cleartext) repo has NO UnmaskPath. With RepoScheme reporting "none" and
+// RepoRootFor pointing at a local checkout, the proxy must (a) identity-map
+// path_token → real_path and (b) hydrate the snippet from disk — the whole
+// point of the "decouple hydration from unmasking" fix. Previously this returned
+// path_token only, forcing a follow-up Read on the common dev/eval setup.
+func TestEnrichQueryResponse_NoneSchemeHydratesFromCheckout(t *testing.T) {
+	const repoID = "cleartext-repo"
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("line1\nline2\nline3\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	cfg := Config{
+		// no UnmaskPath — cleartext repo
+		RepoScheme:  func(string) (string, bool) { return "none", true },
+		RepoRootFor: func(string) (string, bool) { return dir, true },
+	}
+
+	env := map[string]any{
+		"status": "ok",
+		"repos":  map[string]any{repoID: map[string]any{"masking_scheme": "none", "remote_url": "github.com/acme/svc"}},
+		"results": []map[string]any{
+			{"repo_id": repoID, "path_token": "app.py", "line_start": 1, "line_end": 2},
+		},
+	}
+	b, _ := json.Marshal(env)
+
+	out := enrichQueryResponse(cfg, b)
+
+	var enriched map[string]json.RawMessage
+	if err := json.Unmarshal(out, &enriched); err != nil {
+		t.Fatalf("unmarshal enriched: %v", err)
+	}
+	var results []map[string]json.RawMessage
+	if err := json.Unmarshal(enriched["results"], &results); err != nil {
+		t.Fatalf("unmarshal results: %v", err)
+	}
+	var realPath, snippet string
+	_ = json.Unmarshal(results[0]["real_path"], &realPath)
+	_ = json.Unmarshal(results[0]["snippet"], &snippet)
+	if realPath != "app.py" {
+		t.Errorf("real_path = %q, want identity %q", realPath, "app.py")
+	}
+	if snippet != "line1\nline2" {
+		t.Errorf("snippet = %q, want %q (1-based [1,2] hydrated from checkout)", snippet, "line1\nline2")
 	}
 }
 

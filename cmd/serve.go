@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/codastre/cli/internal/checkouts"
 	"github.com/codastre/cli/internal/keychain"
 	"github.com/codastre/cli/internal/mcpshim"
+	"github.com/codastre/cli/internal/unmask"
 	"github.com/spf13/cobra"
 )
 
@@ -57,11 +59,61 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}()
 	}
 
+	repoScheme, repoRootFor := federatedHydration(serveServerURL, apiKey, repoRoot)
+
 	cfg := mcpshim.Config{
-		ServerURL:  serveServerURL,
-		APIKey:     apiKey,
-		RepoRoot:   repoRoot,
-		UnmaskPath: setupUnmask(serveServerURL, apiKey, repoRoot, store),
+		ServerURL:   serveServerURL,
+		APIKey:      apiKey,
+		RepoRoot:    repoRoot,
+		UnmaskPath:  setupUnmask(serveServerURL, apiKey, repoRoot, store),
+		RepoScheme:  repoScheme,
+		RepoRootFor: repoRootFor,
 	}
 	return mcpshim.Run(cfg, os.Stdin, os.Stdout)
+}
+
+// federatedHydration builds the per-repo scheme/root lookups the proxy uses to
+// hydrate snippets across ALL result repos, not just the CWD one. It snapshots
+// GET /v1/repos into repo_id → {remote_url, masking_scheme}, so:
+//   - `none`-scheme repos get identity-mapped real paths + snippets (the common
+//     dev/eval setup, previously starved of snippets because it has no unmasker);
+//   - a federated hit from another repo hydrates from that repo's local checkout
+//     (the CWD repo, or one remembered in ~/.config/codastre/checkouts.json).
+//
+// Best-effort: on any error it returns (nil, nil) and the proxy falls back to
+// CWD-only, UnmaskPath-gated behavior. The snapshot is taken once at startup;
+// repos registered mid-session won't hydrate until the next `serve`.
+func federatedHydration(serverURL, apiKey, cwdRoot string) (
+	func(repoID string) (string, bool),
+	func(repoID string) (string, bool),
+) {
+	repos, err := unmask.ListRepos(serverURL, apiKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not list repos for federated snippet hydration: %v\n", err)
+		return nil, nil
+	}
+	byID := make(map[string]unmask.RepoInfo, len(repos))
+	for _, r := range repos {
+		byID[r.RepoID] = r
+	}
+	_, cwdURL := cwdRepo() // normalized origin of the CWD repo ("" when not in a repo)
+
+	scheme := func(repoID string) (string, bool) {
+		r, ok := byID[repoID]
+		if !ok {
+			return "", false
+		}
+		return r.MaskingScheme, true
+	}
+	rootFor := func(repoID string) (string, bool) {
+		r, ok := byID[repoID]
+		if !ok {
+			return "", false
+		}
+		if cwdRoot != "" && cwdURL != "" && r.RemoteURL == cwdURL {
+			return cwdRoot, true // the CWD checkout, no registry lookup needed
+		}
+		return checkouts.Lookup(r.RemoteURL)
+	}
+	return scheme, rootFor
 }

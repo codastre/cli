@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -24,6 +25,50 @@ type Config struct {
 	RepoRoot  string
 	// UnmaskPath, if non-nil, converts a path_token to the real path for a given mask_key_rev.
 	UnmaskPath func(pathToken string, maskKeyRev int) (string, bool)
+	// RepoScheme returns a repo's masking scheme ("hmac" | "none") by repo_id, when
+	// known. It lets the proxy hydrate `none`-scheme (cleartext) repos — where the
+	// path_token already IS the real repo-relative path — without an UnmaskPath.
+	// Snippet hydration only needs a repo root, not masking; gating it on unmasking
+	// wrongly starved cleartext repos of the inline snippets that are the proxy's
+	// whole value-add. Nil → schemes unknown (legacy: only UnmaskPath-backed hmac
+	// repos are enriched).
+	RepoScheme func(repoID string) (string, bool)
+	// RepoRootFor returns the local checkout root for a repo_id, so a FEDERATED hit
+	// from a repo other than the CWD one can still be hydrated. Nil, or a miss,
+	// falls back to RepoRoot (the CWD checkout).
+	RepoRootFor func(repoID string) (string, bool)
+}
+
+// canEnrich reports whether the proxy has any way to produce real paths /
+// snippets: an unmasker (hmac repos) or scheme knowledge (cleartext repos).
+func (cfg Config) canEnrich() bool {
+	return cfg.UnmaskPath != nil || cfg.RepoScheme != nil
+}
+
+// unmaskOrIdentity maps a path_token to its real path. For a `none`-scheme repo
+// the token is already cleartext, so the mapping is the identity — no key, no
+// unmasker needed. For hmac (or unknown-scheme) repos it defers to UnmaskPath.
+func (cfg Config) unmaskOrIdentity(pathToken, repoID string, rev int) (string, bool) {
+	if cfg.RepoScheme != nil {
+		if s, ok := cfg.RepoScheme(repoID); ok && s == "none" {
+			return pathToken, true
+		}
+	}
+	if cfg.UnmaskPath == nil {
+		return "", false
+	}
+	return cfg.UnmaskPath(pathToken, rev)
+}
+
+// rootFor returns the local checkout root to hydrate a repo's file from: the
+// per-repo checkout when known (federated hits), else the CWD RepoRoot.
+func (cfg Config) rootFor(repoID string) string {
+	if cfg.RepoRootFor != nil {
+		if r, ok := cfg.RepoRootFor(repoID); ok && r != "" {
+			return r
+		}
+	}
+	return cfg.RepoRoot
 }
 
 // Run reads JSON-RPC messages from in, proxies them to the server, and writes
@@ -87,7 +132,7 @@ func forwardMessage(cfg Config, body []byte) ([]byte, error) {
 // "text","text":"<json>"}]}}); the payload may also appear bare (un-enveloped).
 // Returns data unchanged when no known payload is found.
 func enrichResponse(cfg Config, data []byte) []byte {
-	if cfg.UnmaskPath == nil {
+	if !cfg.canEnrich() {
 		return data
 	}
 	var env map[string]json.RawMessage
@@ -218,7 +263,7 @@ func blockType(block map[string]json.RawMessage) string {
 
 // enrichQueryResponse unmasks path_tokens and hydrates snippets in QUERY responses.
 func enrichQueryResponse(cfg Config, data []byte) []byte {
-	if cfg.UnmaskPath == nil || cfg.RepoRoot == "" {
+	if !cfg.canEnrich() {
 		return data
 	}
 
@@ -262,31 +307,37 @@ func enrichQueryResponse(cfg Config, data []byte) []byte {
 		if v, ok := maskKeyRevs[repoID]; ok {
 			rev = v
 		}
-		realPath, ok := cfg.UnmaskPath(pathToken, rev)
+		// hmac → inverse-HMAC via UnmaskPath; none → identity (token is cleartext).
+		realPath, ok := cfg.unmaskOrIdentity(pathToken, repoID, rev)
 		if !ok {
 			continue
 		}
 		r["real_path"], _ = json.Marshal(realPath)
 
-		// Snippet hydration (impl-spec §2.7).
-		var lineStart, lineEnd int
-		var blobSHA string
-		if raw, ok := r["line_start"]; ok {
-			_ = json.Unmarshal(raw, &lineStart)
-		}
-		if raw, ok := r["line_end"]; ok {
-			_ = json.Unmarshal(raw, &lineEnd)
-		}
-		if raw, ok := r["blob_sha"]; ok {
-			_ = json.Unmarshal(raw, &blobSHA)
-		}
+		// Snippet hydration (impl-spec §2.7). Independent of masking — it needs
+		// only a local checkout root, resolved per-repo so federated hits hydrate
+		// too. Skip silently when no checkout is known (real_path still stands).
+		root := cfg.rootFor(repoID)
+		if root != "" {
+			var lineStart, lineEnd int
+			var blobSHA string
+			if raw, ok := r["line_start"]; ok {
+				_ = json.Unmarshal(raw, &lineStart)
+			}
+			if raw, ok := r["line_end"]; ok {
+				_ = json.Unmarshal(raw, &lineEnd)
+			}
+			if raw, ok := r["blob_sha"]; ok {
+				_ = json.Unmarshal(raw, &blobSHA)
+			}
 
-		absPath := cfg.RepoRoot + "/" + realPath
-		snippet, stale, err := hydrateSnippet(absPath, lineStart, lineEnd, blobSHA)
-		if err == nil {
-			r["snippet"], _ = json.Marshal(snippet)
-			if stale {
-				r["stale"], _ = json.Marshal(true)
+			absPath := filepath.Join(root, realPath)
+			snippet, stale, err := hydrateSnippet(absPath, lineStart, lineEnd, blobSHA)
+			if err == nil {
+				r["snippet"], _ = json.Marshal(snippet)
+				if stale {
+					r["stale"], _ = json.Marshal(true)
+				}
 			}
 		}
 		results[i] = r
@@ -309,7 +360,7 @@ func enrichQueryResponse(cfg Config, data []byte) []byte {
 // hardcoded rev 0 silently wrong-unmasked rotated hmac repos (corpus-hygiene
 // plan API3); repos absent from the map (or a missing map) still fall back to 0.
 func enrichGraphResponse(cfg Config, data []byte) []byte {
-	if cfg.UnmaskPath == nil {
+	if !cfg.canEnrich() {
 		return data
 	}
 
@@ -353,13 +404,13 @@ func enrichGraphResponse(cfg Config, data []byte) []byte {
 		if err := json.Unmarshal(raw, &node); err != nil {
 			return rev
 		}
-		if repoID, ok := unmarshalString(node["repo_id"]); ok {
-			if r, ok := repoRevs[repoID]; ok {
-				rev = r
-			}
+		repoID, _ := unmarshalString(node["repo_id"])
+		if r, ok := repoRevs[repoID]; ok {
+			rev = r
 		}
 		if tok, ok := unmarshalString(node[tokenField]); ok {
-			if realPath, ok := cfg.UnmaskPath(tok, rev); ok {
+			// hmac → UnmaskPath; none → identity (token is the real path).
+			if realPath, ok := cfg.unmaskOrIdentity(tok, repoID, rev); ok {
 				node[realField], _ = json.Marshal(realPath)
 				e[key], _ = json.Marshal(node)
 			}
@@ -372,13 +423,13 @@ func enrichGraphResponse(cfg Config, data []byte) []byte {
 		unmaskNode(e, "dst", "path_token", "real_path")
 
 		// Unmask evidence.file_path_token -> evidence.real_file_path (optional
-		// field). Evidence is the SRC side's call site, so it unmaskes at the
-		// src repo's rev.
+		// field). Evidence is the SRC side's call site, so it unmasks at the src
+		// repo's rev and scheme (identity for a `none`-scheme src repo).
 		if evRaw, ok := e["evidence"]; ok {
 			var ev map[string]json.RawMessage
 			if err := json.Unmarshal(evRaw, &ev); err == nil {
 				if tok, ok := unmarshalString(ev["file_path_token"]); ok {
-					if realPath, ok := cfg.UnmaskPath(tok, srcRev); ok {
+					if realPath, ok := cfg.unmaskOrIdentity(tok, edgeNodeRepoID(e, "src"), srcRev); ok {
 						ev["real_file_path"], _ = json.Marshal(realPath)
 						e["evidence"], _ = json.Marshal(ev)
 					}
@@ -395,6 +446,21 @@ func enrichGraphResponse(cfg Config, data []byte) []byte {
 	return out
 }
 
+// edgeNodeRepoID returns the repo_id of an edge's "src"/"dst" node, or "" when
+// absent. Used to pick the masking scheme for evidence (which rides the src repo).
+func edgeNodeRepoID(e map[string]json.RawMessage, key string) string {
+	raw, ok := e[key]
+	if !ok {
+		return ""
+	}
+	var node map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &node); err != nil {
+		return ""
+	}
+	id, _ := unmarshalString(node["repo_id"])
+	return id
+}
+
 // unmarshalString extracts a Go string from a json.RawMessage.
 // Returns ("", false) if raw is nil or not a JSON string.
 func unmarshalString(raw json.RawMessage) (string, bool) {
@@ -408,8 +474,15 @@ func unmarshalString(raw json.RawMessage) (string, bool) {
 	return s, true
 }
 
-// hydrateSnippet reads [lineStart, lineEnd] from the file and checks staleness.
+// hydrateSnippet reads the inclusive, 1-based line range [lineStart, lineEnd]
+// from the file and checks staleness. The server's chunk ranges are 1-based
+// (see the proxy_query_test fixtures); a stray line_start of 0 is clamped to 1
+// so the first line is included rather than skipped. (If a future server change
+// switches to 0-based ranges, this is the one place to revisit.)
 func hydrateSnippet(absPath string, lineStart, lineEnd int, blobSHA string) (string, bool, error) {
+	if lineStart < 1 {
+		lineStart = 1
+	}
 	f, err := os.Open(absPath)
 	if err != nil {
 		return "", false, err

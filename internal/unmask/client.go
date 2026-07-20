@@ -54,6 +54,32 @@ func ResolveRepo(serverURL, apiKey, normalizedRemote string) (*RepoInfo, error) 
 	}
 }
 
+// ListRepos returns every repo visible to the API key by paging GET /v1/repos.
+// The serve proxy uses it to build a repo_id → {remote_url, masking_scheme}
+// snapshot so federated hits can be hydrated per-repo (including cleartext
+// `none`-scheme repos, whose path_token is already the real path). Best-effort:
+// callers fall back to CWD-only hydration on error.
+func ListRepos(serverURL, apiKey string) ([]RepoInfo, error) {
+	base := strings.TrimRight(serverURL, "/")
+	cursor := ""
+	var all []RepoInfo
+	for {
+		u := base + "/v1/repos?limit=200"
+		if cursor != "" {
+			u += "&cursor=" + url.QueryEscape(cursor)
+		}
+		page, err := getJSON[repoPage](u, apiKey)
+		if err != nil {
+			return all, err
+		}
+		all = append(all, page.Items...)
+		if page.NextCursor == nil || *page.NextCursor == "" {
+			return all, nil
+		}
+		cursor = *page.NextCursor
+	}
+}
+
 // IndexInfo is the subset of GET /v1/repos/{id}/indexes a SYNC needs: the base
 // index to diff a feature branch against.
 type IndexInfo struct {
