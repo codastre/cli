@@ -34,9 +34,14 @@ type Config struct {
 	// repos are enriched).
 	RepoScheme func(repoID string) (string, bool)
 	// RepoRootFor returns the local checkout root for a repo_id, so a FEDERATED hit
-	// from a repo other than the CWD one can still be hydrated. Nil, or a miss,
-	// falls back to RepoRoot (the CWD checkout).
+	// from a repo other than the CWD one can still be hydrated. A miss means "no
+	// checkout known for this repo" and the result is left unhydrated — see
+	// rootFor for why falling back to RepoRoot would be wrong.
 	RepoRootFor func(repoID string) (string, bool)
+	// CWDRepoID is the repo_id of the repo the CLI is running inside, when it is
+	// registered. It is the ONLY repo for which RepoRoot is a sound hydration
+	// root; see rootFor.
+	CWDRepoID string
 }
 
 // canEnrich reports whether the proxy has any way to produce real paths /
@@ -60,15 +65,35 @@ func (cfg Config) unmaskOrIdentity(pathToken, repoID string, rev int) (string, b
 	return cfg.UnmaskPath(pathToken, rev)
 }
 
-// rootFor returns the local checkout root to hydrate a repo's file from: the
-// per-repo checkout when known (federated hits), else the CWD RepoRoot.
+// rootFor returns the local checkout root to hydrate a repo's file from, or ""
+// when no checkout is known for repoID.
+//
+// Returning "" (rather than falling back to RepoRoot) is the whole point. The
+// CWD checkout is a valid hydration root for exactly one repo — the one the CLI
+// is running inside. Using it for any other repo joins that repo's path onto
+// this tree, and because files like CLAUDE.md / README.md / Makefile exist in
+// most repos, the read SUCCEEDS and returns real but wrong content under a
+// correct-looking path. That is worse than returning nothing: it is confidently
+// wrong, and the staleness check can't catch it when the envelope carries no
+// blob_sha.
 func (cfg Config) rootFor(repoID string) string {
 	if cfg.RepoRootFor != nil {
 		if r, ok := cfg.RepoRootFor(repoID); ok && r != "" {
 			return r
 		}
 	}
-	return cfg.RepoRoot
+	// Sound only when repoID IS the CWD repo. When CWDRepoID is unset we cannot
+	// prove that, so hydration is skipped rather than guessed.
+	if cfg.CWDRepoID != "" && repoID == cfg.CWDRepoID {
+		return cfg.RepoRoot
+	}
+	// Legacy single-repo path: no per-repo lookup at all. Hydration is then
+	// gated behind UnmaskPath, which is keyed to the CWD repo's masking key, so
+	// a foreign repo's token does not unmask and never reaches here.
+	if cfg.RepoRootFor == nil && cfg.RepoScheme == nil {
+		return cfg.RepoRoot
+	}
+	return ""
 }
 
 // Run reads JSON-RPC messages from in, proxies them to the server, and writes

@@ -59,7 +59,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}()
 	}
 
-	repoScheme, repoRootFor := federatedHydration(serveServerURL, apiKey, repoRoot)
+	repoScheme, repoRootFor, cwdRepoID := federatedHydration(serveServerURL, apiKey, repoRoot)
 
 	cfg := mcpshim.Config{
 		ServerURL:   serveServerURL,
@@ -68,6 +68,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		UnmaskPath:  setupUnmask(serveServerURL, apiKey, repoRoot, store),
 		RepoScheme:  repoScheme,
 		RepoRootFor: repoRootFor,
+		CWDRepoID:   cwdRepoID,
 	}
 	return mcpshim.Run(cfg, os.Stdin, os.Stdout)
 }
@@ -80,23 +81,37 @@ func runServe(cmd *cobra.Command, args []string) error {
 //   - a federated hit from another repo hydrates from that repo's local checkout
 //     (the CWD repo, or one remembered in ~/.config/codastre/checkouts.json).
 //
-// Best-effort: on any error it returns (nil, nil) and the proxy falls back to
+// It also returns the CWD repo's repo_id, the one repo for which the CWD
+// checkout is a sound hydration root (see mcpshim.Config.rootFor).
+//
+// Best-effort: on any error it returns (nil, nil, "") and the proxy falls back to
 // CWD-only, UnmaskPath-gated behavior. The snapshot is taken once at startup;
 // repos registered mid-session won't hydrate until the next `serve`.
 func federatedHydration(serverURL, apiKey, cwdRoot string) (
 	func(repoID string) (string, bool),
 	func(repoID string) (string, bool),
+	string,
 ) {
 	repos, err := unmask.ListRepos(serverURL, apiKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not list repos for federated snippet hydration: %v\n", err)
-		return nil, nil
+		return nil, nil, ""
 	}
 	byID := make(map[string]unmask.RepoInfo, len(repos))
 	for _, r := range repos {
 		byID[r.RepoID] = r
 	}
 	_, cwdURL := cwdRepo() // normalized origin of the CWD repo ("" when not in a repo)
+
+	cwdRepoID := ""
+	if cwdURL != "" {
+		for _, r := range repos {
+			if r.RemoteURL == cwdURL {
+				cwdRepoID = r.RepoID
+				break
+			}
+		}
+	}
 
 	scheme := func(repoID string) (string, bool) {
 		r, ok := byID[repoID]
@@ -115,5 +130,5 @@ func federatedHydration(serverURL, apiKey, cwdRoot string) (
 		}
 		return checkouts.Lookup(r.RemoteURL)
 	}
-	return scheme, rootFor
+	return scheme, rootFor, cwdRepoID
 }

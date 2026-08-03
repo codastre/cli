@@ -253,3 +253,124 @@ func TestEnrichQueryResponse_FallsBackToSingularRev(t *testing.T) {
 		t.Fatalf("UnmaskPath called with rev %d, want 2 (singular fallback)", gotRev)
 	}
 }
+
+// The wrong-repo hydration bug (ANALYSIS §"Confirmed bug"): a QUERY scoped to
+// one repo returned a CLAUDE.md hit whose inlined snippet was the *calling*
+// repo's CLAUDE.md. rootFor fell back to cfg.RepoRoot whenever RepoRootFor had
+// no checkout for the result's repo_id, so filepath.Join pointed into the CWD
+// tree — and because CLAUDE.md / README.md / Makefile exist in most repos, the
+// read succeeded and shipped real but wrong content under a correct path.
+//
+// Two repos share the relative path; a checkout is registered for only one.
+// The other must come back UNHYDRATED rather than hydrated from the first tree.
+func TestEnrichQueryResponse_NoCheckoutDoesNotHydrateFromCWDRepo(t *testing.T) {
+	const knownRepo = "repo-with-checkout"
+	const otherRepo = "repo-without-checkout"
+
+	cwdDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwdDir, "CLAUDE.md"), []byte("CWD REPO CONTENT\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	cfg := Config{
+		RepoRoot:   cwdDir,
+		CWDRepoID:  knownRepo,
+		RepoScheme: func(string) (string, bool) { return "none", true },
+		RepoRootFor: func(id string) (string, bool) {
+			if id == knownRepo {
+				return cwdDir, true
+			}
+			return "", false // no checkout known for otherRepo
+		},
+	}
+
+	env := map[string]any{
+		"status": "ok",
+		"repos": map[string]any{
+			knownRepo: map[string]any{"masking_scheme": "none", "remote_url": "github.com/acme/known"},
+			otherRepo: map[string]any{"masking_scheme": "none", "remote_url": "github.com/acme/other"},
+		},
+		"results": []map[string]any{
+			{"repo_id": knownRepo, "path_token": "CLAUDE.md", "line_start": 1, "line_end": 1},
+			{"repo_id": otherRepo, "path_token": "CLAUDE.md", "line_start": 1, "line_end": 1},
+		},
+	}
+	b, _ := json.Marshal(env)
+
+	out := enrichQueryResponse(cfg, b)
+
+	var enriched map[string]json.RawMessage
+	if err := json.Unmarshal(out, &enriched); err != nil {
+		t.Fatalf("unmarshal enriched: %v", err)
+	}
+	var results []map[string]json.RawMessage
+	if err := json.Unmarshal(enriched["results"], &results); err != nil {
+		t.Fatalf("unmarshal results: %v", err)
+	}
+
+	// The repo WITH a checkout still hydrates — the fix must not starve it.
+	var knownSnippet string
+	_ = json.Unmarshal(results[0]["snippet"], &knownSnippet)
+	if knownSnippet != "CWD REPO CONTENT" {
+		t.Errorf("known-checkout snippet = %q, want %q", knownSnippet, "CWD REPO CONTENT")
+	}
+
+	// The repo WITHOUT a checkout must carry no snippet at all.
+	if raw, ok := results[1]["snippet"]; ok {
+		var got string
+		_ = json.Unmarshal(raw, &got)
+		t.Errorf("snippet for repo with no checkout = %q, want none (would be the CWD repo's file)", got)
+	}
+	// real_path still stands — only hydration is skipped.
+	var realPath string
+	_ = json.Unmarshal(results[1]["real_path"], &realPath)
+	if realPath != "CLAUDE.md" {
+		t.Errorf("real_path = %q, want %q", realPath, "CLAUDE.md")
+	}
+}
+
+// blob_sha on the envelope is what makes hydrateSnippet's staleness check live.
+// When the local file differs from the indexed blob, the result must be flagged
+// rather than silently shipped as current.
+func TestEnrichQueryResponse_BlobShaMismatchMarksStale(t *testing.T) {
+	const repoID = "cleartext-repo"
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "app.py"), []byte("local content\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	cfg := Config{
+		RepoScheme:  func(string) (string, bool) { return "none", true },
+		RepoRootFor: func(string) (string, bool) { return dir, true },
+	}
+
+	env := map[string]any{
+		"status": "ok",
+		"repos":  map[string]any{repoID: map[string]any{"masking_scheme": "none", "remote_url": "github.com/acme/svc"}},
+		"results": []map[string]any{
+			{
+				"repo_id":    repoID,
+				"path_token": "app.py",
+				"line_start": 1,
+				"line_end":   1,
+				"blob_sha":   "0000000000000000000000000000000000000000",
+			},
+		},
+	}
+	b, _ := json.Marshal(env)
+
+	out := enrichQueryResponse(cfg, b)
+
+	var enriched map[string]json.RawMessage
+	_ = json.Unmarshal(out, &enriched)
+	var results []map[string]json.RawMessage
+	_ = json.Unmarshal(enriched["results"], &results)
+
+	var stale bool
+	if raw, ok := results[0]["stale"]; ok {
+		_ = json.Unmarshal(raw, &stale)
+	}
+	if !stale {
+		t.Error("stale = false, want true (local file does not match the indexed blob_sha)")
+	}
+}
