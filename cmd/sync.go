@@ -32,7 +32,7 @@ func init() {
 
 func runSync(cmd *cobra.Command, args []string) error {
 	if syncOnce {
-		return doSync()
+		return doSync(false)
 	}
 	return watchAndSync()
 }
@@ -74,7 +74,7 @@ func watchAndSync() error {
 			}
 			fmt.Fprintf(os.Stderr, "watch error: %v\n", watchErr)
 		case <-debounce:
-			if err := doSync(); err != nil {
+			if err := doSync(true); err != nil {
 				fmt.Fprintf(os.Stderr, "sync error: %v\n", err)
 			}
 			debounce = nil
@@ -92,7 +92,7 @@ func pollSync(repoRoot string) error {
 		if err == nil {
 			mt := stat.ModTime()
 			if !lastMtime.IsZero() && mt.After(lastMtime) {
-				if err := doSync(); err != nil {
+				if err := doSync(true); err != nil {
 					fmt.Fprintf(os.Stderr, "sync error: %v\n", err)
 				}
 			}
@@ -107,13 +107,33 @@ func pollSync(repoRoot string) error {
 // over MCP SYNC.
 //
 // It no-ops quietly (returning nil) when there is nothing to do — HEAD is the
-// base, the repo isn't registered, or no base index is ready — so the HEAD
-// watcher does not spam errors on every commit to the base branch.
-func doSync() error {
+// base branch, HEAD is the base commit, the repo isn't registered, or no base
+// index is ready — so the HEAD watcher does not spam errors on every commit to
+// the base branch.
+//
+// Every no-op and every successful sync is recorded in .git (see sync_state.go),
+// and a recorded ref pair short-circuits before the first network call. Without
+// that, any write under .git/refs — including ones that change nothing we care
+// about — re-sent an identical diff, and N agent sessions in one working copy
+// each ran their own watcher, so a quiet repo still produced a steady stream of
+// duplicate SYNCs.
+//
+// dedup is false for an explicit `codastre sync --once`: the user asked for a
+// sync, so they get one even if the refs have not moved.
+func doSync(dedup bool) error {
 	repoRoot, err := findGitRoot(".")
 	if err != nil {
 		return err
 	}
+
+	toName, toSHA, err := git.HeadRef(repoRoot)
+	if err != nil {
+		return err
+	}
+	if dedup && syncIsRedundant(readSyncState(repoRoot), toName, toSHA, time.Now()) {
+		return nil
+	}
+
 	serverURL := syncServerURL
 	apiKey, warn, err := resolveAPIKey(serverURL, "")
 	if err != nil {
@@ -150,11 +170,20 @@ func doSync() error {
 		return nil
 	}
 
-	toName, toSHA, err := git.HeadRef(repoRoot)
-	if err != nil {
-		return err
+	// The base branch is never an overlay: an overlay named after the base ref
+	// would duplicate the base for every changed file, and keeping the base fresh
+	// is the server's base_rollforward job, not ours. So a base branch that has
+	// moved past base_ref_sha is the server's business, not an overlay to push —
+	// skip it here (and record the skip so the watcher stops re-resolving it).
+	if toName == base.BaseRefName {
+		recordSync(repoRoot, base.IndexID, toName, toSHA)
+		fmt.Fprintf(os.Stderr,
+			"sync: on base branch %s — nothing to overlay (base freshness is server-side)\n",
+			toName)
+		return nil
 	}
 	if toSHA == base.BaseRefSHA {
+		recordSync(repoRoot, base.IndexID, toName, toSHA)
 		return nil // on the base commit; nothing to overlay
 	}
 
@@ -193,8 +222,20 @@ func doSync() error {
 	}
 
 	status, jobID := parseSyncResult(payload)
+	recordSync(repoRoot, base.IndexID, toName, toSHA)
 	fmt.Fprintf(os.Stderr, "sync: %s → %s (status=%s job=%s)\n", base.BaseRefName, toName, status, jobID)
 	return nil
+}
+
+// recordSync stamps the ref pair as handled so identical watcher wake-ups —
+// including those from other agent sessions sharing this working copy — return
+// before touching the network. Best-effort: a write failure only costs a
+// redundant SYNC next time.
+func recordSync(repoRoot, indexID, toName, toSHA string) {
+	st := syncState{IndexID: indexID, ToRef: toName, ToSHA: toSHA, SyncedAt: time.Now()}
+	if err := writeSyncState(repoRoot, st); err != nil {
+		fmt.Fprintf(os.Stderr, "sync: could not record sync state: %v\n", err)
+	}
 }
 
 // syncMaskKey returns the masking key needed to mask the diff, or nil for an
