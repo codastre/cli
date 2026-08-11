@@ -205,3 +205,72 @@ func TestEnrichGraphResponse_EvidenceUnmask(t *testing.T) {
 		t.Errorf("evidence.real_file_path = %q, want %q", realFile, "src/Producer.java")
 	}
 }
+
+// GRAPH's server-side repos map carries only {masking_scheme, mask_key_rev}, so a
+// federated edge identifies its endpoints by bare UUID and an agent cannot say
+// WHICH service is on the other end of a kafka/http edge. The proxy already holds
+// repo_id → remote_url for hydration, so it backfills the field locally, matching
+// QUERY's repos map.
+func TestEnrichGraphResponse_BackfillsRemoteURL(t *testing.T) {
+	cfg := Config{
+		RepoScheme: func(string) (string, bool) { return "none", true },
+		RepoRemoteURL: func(repoID string) (string, bool) {
+			if repoID == "src-repo" {
+				return "github.com/my-org/orders-service", true
+			}
+			return "", false
+		},
+	}
+	input := []byte(`{
+	  "edges": [{"edge":{"kind":"kafka","confidence":0.95},
+	             "src":{"repo_id":"src-repo","path_token":"a.go"},
+	             "dst":{"repo_id":"unknown-repo","path_token":"b.go"}}],
+	  "repos": {"src-repo":{"masking_scheme":"none","mask_key_rev":1},
+	            "unknown-repo":{"masking_scheme":"none","mask_key_rev":1}}
+	}`)
+
+	out := enrichGraphResponse(cfg, input)
+
+	var env struct {
+		Repos map[string]map[string]any `json:"repos"`
+	}
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := env.Repos["src-repo"]["remote_url"]; got != "github.com/my-org/orders-service" {
+		t.Errorf("src-repo remote_url = %v, want the backfilled URL", got)
+	}
+	// A repo the proxy doesn't know is left alone rather than invented.
+	if _, ok := env.Repos["unknown-repo"]["remote_url"]; ok {
+		t.Error("unknown-repo must not gain a remote_url")
+	}
+	// Pre-existing masking fields must survive the rewrite.
+	if got := env.Repos["src-repo"]["masking_scheme"]; got != "none" {
+		t.Errorf("masking_scheme lost: %v", got)
+	}
+}
+
+// If a future server version starts sending remote_url, its value must win over
+// the proxy's local snapshot, which can be stale.
+func TestEnrichGraphResponse_DoesNotOverwriteServerRemoteURL(t *testing.T) {
+	cfg := Config{
+		RepoScheme:    func(string) (string, bool) { return "none", true },
+		RepoRemoteURL: func(string) (string, bool) { return "github.com/my-org/stale", true },
+	}
+	input := []byte(`{
+	  "edges": [{"edge":{"kind":"kafka"},"src":{"repo_id":"r1","path_token":"a.go"},"dst":{"repo_id":"r1","path_token":"b.go"}}],
+	  "repos": {"r1":{"masking_scheme":"none","mask_key_rev":1,"remote_url":"github.com/my-org/authoritative"}}
+	}`)
+
+	out := enrichGraphResponse(cfg, input)
+
+	var env struct {
+		Repos map[string]map[string]any `json:"repos"`
+	}
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := env.Repos["r1"]["remote_url"]; got != "github.com/my-org/authoritative" {
+		t.Errorf("remote_url = %v; server value must win", got)
+	}
+}

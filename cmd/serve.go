@@ -59,18 +59,31 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}()
 	}
 
-	repoScheme, repoRootFor, cwdRepoID := federatedHydration(serveServerURL, apiKey, repoRoot)
+	hy := federatedHydration(serveServerURL, apiKey, repoRoot)
 
 	cfg := mcpshim.Config{
-		ServerURL:   serveServerURL,
-		APIKey:      apiKey,
-		RepoRoot:    repoRoot,
-		UnmaskPath:  setupUnmask(serveServerURL, apiKey, repoRoot, store),
-		RepoScheme:  repoScheme,
-		RepoRootFor: repoRootFor,
-		CWDRepoID:   cwdRepoID,
+		ServerURL:     serveServerURL,
+		APIKey:        apiKey,
+		RepoRoot:      repoRoot,
+		UnmaskPath:    setupUnmask(serveServerURL, apiKey, repoRoot, store),
+		RepoScheme:    hy.Scheme,
+		RepoRootFor:   hy.RootFor,
+		RepoRemoteURL: hy.RemoteURL,
+		CWDRepoID:     hy.CWDRepoID,
 	}
 	return mcpshim.Run(cfg, os.Stdin, os.Stdout)
+}
+
+// hydrationLookups carries the per-repo lookups the proxy needs. It is a struct
+// rather than a tuple of returns because three of the four members share the
+// type func(string) (string, bool): as positional results, swapping RootFor and
+// RemoteURL at either end compiles cleanly and silently joins repo paths onto
+// remote URLs — nothing hydrates and nothing errors.
+type hydrationLookups struct {
+	Scheme    func(repoID string) (string, bool)
+	RootFor   func(repoID string) (string, bool)
+	RemoteURL func(repoID string) (string, bool)
+	CWDRepoID string
 }
 
 // federatedHydration builds the per-repo scheme/root lookups the proxy uses to
@@ -81,21 +94,19 @@ func runServe(cmd *cobra.Command, args []string) error {
 //   - a federated hit from another repo hydrates from that repo's local checkout
 //     (the CWD repo, or one remembered in ~/.config/codastre/checkouts.json).
 //
-// It also returns the CWD repo's repo_id, the one repo for which the CWD
-// checkout is a sound hydration root (see mcpshim.Config.rootFor).
+// It also returns a repo_id → remote_url lookup, used to backfill GRAPH's repos
+// map (which the server sends without URLs), and the CWD repo's repo_id — the one
+// repo for which the CWD checkout is a sound hydration root (see
+// mcpshim.Config.rootFor).
 //
-// Best-effort: on any error it returns (nil, nil, "") and the proxy falls back to
-// CWD-only, UnmaskPath-gated behavior. The snapshot is taken once at startup;
-// repos registered mid-session won't hydrate until the next `serve`.
-func federatedHydration(serverURL, apiKey, cwdRoot string) (
-	func(repoID string) (string, bool),
-	func(repoID string) (string, bool),
-	string,
-) {
+// Best-effort: on any error it returns a zero hydrationLookups and the proxy
+// falls back to CWD-only, UnmaskPath-gated behavior. The snapshot is taken once
+// at startup; repos registered mid-session won't hydrate until the next `serve`.
+func federatedHydration(serverURL, apiKey, cwdRoot string) hydrationLookups {
 	repos, err := unmask.ListRepos(serverURL, apiKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not list repos for federated snippet hydration: %v\n", err)
-		return nil, nil, ""
+		return hydrationLookups{}
 	}
 	byID := make(map[string]unmask.RepoInfo, len(repos))
 	for _, r := range repos {
@@ -113,22 +124,31 @@ func federatedHydration(serverURL, apiKey, cwdRoot string) (
 		}
 	}
 
-	scheme := func(repoID string) (string, bool) {
-		r, ok := byID[repoID]
-		if !ok {
-			return "", false
-		}
-		return r.MaskingScheme, true
+	return hydrationLookups{
+		Scheme: func(repoID string) (string, bool) {
+			r, ok := byID[repoID]
+			if !ok {
+				return "", false
+			}
+			return r.MaskingScheme, true
+		},
+		RootFor: func(repoID string) (string, bool) {
+			r, ok := byID[repoID]
+			if !ok {
+				return "", false
+			}
+			if cwdRoot != "" && cwdURL != "" && r.RemoteURL == cwdURL {
+				return cwdRoot, true // the CWD checkout, no registry lookup needed
+			}
+			return checkouts.Lookup(r.RemoteURL)
+		},
+		RemoteURL: func(repoID string) (string, bool) {
+			r, ok := byID[repoID]
+			if !ok || r.RemoteURL == "" {
+				return "", false
+			}
+			return r.RemoteURL, true
+		},
+		CWDRepoID: cwdRepoID,
 	}
-	rootFor := func(repoID string) (string, bool) {
-		r, ok := byID[repoID]
-		if !ok {
-			return "", false
-		}
-		if cwdRoot != "" && cwdURL != "" && r.RemoteURL == cwdURL {
-			return cwdRoot, true // the CWD checkout, no registry lookup needed
-		}
-		return checkouts.Lookup(r.RemoteURL)
-	}
-	return scheme, rootFor, cwdRepoID
 }

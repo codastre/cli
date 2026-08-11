@@ -42,7 +42,40 @@ type Config struct {
 	// registered. It is the ONLY repo for which RepoRoot is a sound hydration
 	// root; see rootFor.
 	CWDRepoID string
+	// RepoRemoteURL returns a repo's remote URL by repo_id. GRAPH's server-side
+	// repos map carries only {masking_scheme, mask_key_rev} — no URL — so a
+	// federated edge identifies its endpoints by bare UUID and an agent cannot name
+	// the service without extra calls. The proxy already holds this mapping for
+	// hydration, so it backfills remote_url locally. Nil → no backfill.
+	RepoRemoteURL func(repoID string) (string, bool)
 }
+
+// Reasons emitted on a QUERY result as `hydration` when no snippet could be
+// produced. Absence of the field means the snippet is present (or the payload
+// predates this proxy). They are stable strings an agent can branch on.
+const (
+	// No local checkout is known for the result's repo. The remedy is external to
+	// this machine's state: clone the repo, or read the file from the forge API.
+	// This is the common federated case and the only one the agent can't fix by
+	// re-running anything locally.
+	hydrationNoCheckout = "no_local_checkout"
+	// A checkout is known but the file isn't at that path in it — indexed at a ref
+	// the checkout lacks, or moved/deleted since. Usually fixed by fetching.
+	hydrationFileMissing = "file_not_found_in_checkout"
+	// The file exists but couldn't be read (permissions, I/O, decode).
+	hydrationReadError = "read_error"
+	// The file was read but the result's line range isn't in it — the checkout is
+	// at a ref where the file is shorter, or the envelope carried no usable
+	// line_end. Distinct from hydrationFileMissing: the path is right, the range
+	// isn't. Re-querying at the checked-out ref (or fetching) is the fix.
+	hydrationRangeMissing = "line_range_not_in_file"
+	// The path_token could not be unmasked: an hmac repo whose masking key isn't
+	// in this machine's keychain — the common case for a federated hit from a repo
+	// the developer has no key for. Nothing local can be read, since even the real
+	// path is unknown. `codastre masking-key --repo-url …` is the fix when the dev
+	// is entitled to the repo.
+	hydrationUnmaskFailed = "path_unmask_failed"
+)
 
 // canEnrich reports whether the proxy has any way to produce real paths /
 // snippets: an unmasker (hmac repos) or scheme knowledge (cleartext repos).
@@ -335,15 +368,25 @@ func enrichQueryResponse(cfg Config, data []byte) []byte {
 		// hmac → inverse-HMAC via UnmaskPath; none → identity (token is cleartext).
 		realPath, ok := cfg.unmaskOrIdentity(pathToken, repoID, rev)
 		if !ok {
+			// No real path, so no snippet either — but the result must still say
+			// why, or it lands in exactly the ambiguous state the `hydration`
+			// field exists to remove (see the invariant above).
+			r["hydration"], _ = json.Marshal(hydrationUnmaskFailed)
+			results[i] = r
 			continue
 		}
 		r["real_path"], _ = json.Marshal(realPath)
 
 		// Snippet hydration (impl-spec §2.7). Independent of masking — it needs
 		// only a local checkout root, resolved per-repo so federated hits hydrate
-		// too. Skip silently when no checkout is known (real_path still stands).
+		// too. When hydration can't happen the result still carries real_path, plus
+		// a `hydration` reason so the agent can act instead of guessing: a missing
+		// snippet is otherwise indistinguishable from "this repo isn't checked out",
+		// "the file moved", and "the read failed" — three cases with three fixes.
 		root := cfg.rootFor(repoID)
-		if root != "" {
+		if root == "" {
+			r["hydration"], _ = json.Marshal(hydrationNoCheckout)
+		} else {
 			var lineStart, lineEnd int
 			var blobSHA string
 			if raw, ok := r["line_start"]; ok {
@@ -357,12 +400,24 @@ func enrichQueryResponse(cfg Config, data []byte) []byte {
 			}
 
 			absPath := filepath.Join(root, realPath)
-			snippet, stale, err := hydrateSnippet(absPath, lineStart, lineEnd, blobSHA)
-			if err == nil {
-				r["snippet"], _ = json.Marshal(snippet)
-				if stale {
+			res, err := hydrateSnippet(absPath, lineStart, lineEnd, blobSHA)
+			switch {
+			case err == nil && res.Lines == 0:
+				// File read fine, but the range wasn't in it. Emitting
+				// `"snippet": ""` here would look like a successful hydration of an
+				// empty region, so report the reason instead.
+				r["hydration"], _ = json.Marshal(hydrationRangeMissing)
+			case err == nil:
+				r["snippet"], _ = json.Marshal(res.Text)
+				if res.Stale {
 					r["stale"], _ = json.Marshal(true)
 				}
+			case os.IsNotExist(err):
+				// Checkout known, file absent: indexed at a ref this checkout
+				// doesn't have, or deleted/moved since. Pulling usually fixes it.
+				r["hydration"], _ = json.Marshal(hydrationFileMissing)
+			default:
+				r["hydration"], _ = json.Marshal(hydrationReadError)
 			}
 		}
 		results[i] = r
@@ -467,8 +522,55 @@ func enrichGraphResponse(cfg Config, data []byte) []byte {
 
 	enriched, _ := json.Marshal(edges)
 	env["edges"] = enriched
+	if repos, ok := backfillRepoURLs(cfg, env["repos"]); ok {
+		env["repos"] = repos
+	}
 	out, _ := json.Marshal(env)
 	return out
+}
+
+// backfillRepoURLs adds remote_url to each entry of a GRAPH repos map, which the
+// server populates with only {masking_scheme, mask_key_rev}. Without it a
+// federated edge names its endpoints by bare UUID, so "which service consumes
+// this topic?" can't be answered from the response — the agent has to spend extra
+// calls, or guess a service from a shared path like app/consumer.py. The proxy
+// already holds repo_id → remote_url for hydration, so it fills the gap locally
+// and matches QUERY's repos map, where remote_url is present.
+//
+// Existing keys are never overwritten: if a future server version starts sending
+// remote_url, its value wins.
+func backfillRepoURLs(cfg Config, reposRaw json.RawMessage) (json.RawMessage, bool) {
+	if cfg.RepoRemoteURL == nil || len(reposRaw) == 0 {
+		return nil, false
+	}
+	var repos map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(reposRaw, &repos); err != nil || len(repos) == 0 {
+		return nil, false
+	}
+	changed := false
+	for repoID, info := range repos {
+		if info == nil {
+			info = map[string]json.RawMessage{}
+		}
+		if _, exists := info["remote_url"]; exists {
+			continue
+		}
+		url, ok := cfg.RepoRemoteURL(repoID)
+		if !ok || url == "" {
+			continue
+		}
+		info["remote_url"], _ = json.Marshal(url)
+		repos[repoID] = info
+		changed = true
+	}
+	if !changed {
+		return nil, false
+	}
+	b, err := json.Marshal(repos)
+	if err != nil {
+		return nil, false
+	}
+	return b, true
 }
 
 // edgeNodeRepoID returns the repo_id of an edge's "src"/"dst" node, or "" when
@@ -499,18 +601,29 @@ func unmarshalString(raw json.RawMessage) (string, bool) {
 	return s, true
 }
 
+// snippetResult is hydrateSnippet's outcome. Lines counts the lines actually
+// read from the requested range, so the caller can tell "the range yielded
+// nothing" (missing/zero line_end, or a checkout where the file is shorter than
+// line_start) from "the range is genuinely blank lines" — the former is a
+// hydration failure that needs a reason, not an empty success.
+type snippetResult struct {
+	Text  string
+	Lines int
+	Stale bool
+}
+
 // hydrateSnippet reads the inclusive, 1-based line range [lineStart, lineEnd]
 // from the file and checks staleness. The server's chunk ranges are 1-based
 // (see the proxy_query_test fixtures); a stray line_start of 0 is clamped to 1
 // so the first line is included rather than skipped. (If a future server change
 // switches to 0-based ranges, this is the one place to revisit.)
-func hydrateSnippet(absPath string, lineStart, lineEnd int, blobSHA string) (string, bool, error) {
+func hydrateSnippet(absPath string, lineStart, lineEnd int, blobSHA string) (snippetResult, error) {
 	if lineStart < 1 {
 		lineStart = 1
 	}
 	f, err := os.Open(absPath)
 	if err != nil {
-		return "", false, err
+		return snippetResult{}, err
 	}
 	defer f.Close()
 
@@ -527,21 +640,23 @@ func hydrateSnippet(absPath string, lineStart, lineEnd int, blobSHA string) (str
 		lineNum++
 	}
 	if err := sc.Err(); err != nil {
-		return "", false, err
+		return snippetResult{}, err
+	}
+	if len(lines) == 0 {
+		return snippetResult{}, nil
 	}
 
-	snippet := strings.Join(lines, "\n")
+	out := snippetResult{Text: strings.Join(lines, "\n"), Lines: len(lines)}
 
 	// Staleness check: compare current blob hash to expected.
-	stale := false
 	if blobSHA != "" {
 		current, err := currentBlobSHA(absPath)
 		if err == nil && current != blobSHA {
-			stale = true
+			out.Stale = true
 		}
 	}
 
-	return snippet, stale, nil
+	return out, nil
 }
 
 func currentBlobSHA(absPath string) (string, error) {

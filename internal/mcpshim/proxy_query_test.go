@@ -374,3 +374,194 @@ func TestEnrichQueryResponse_BlobShaMismatchMarksStale(t *testing.T) {
 		t.Error("stale = false, want true (local file does not match the indexed blob_sha)")
 	}
 }
+
+// A federated hit from a repo with no local checkout cannot be hydrated. The
+// result must still carry real_path AND an explicit hydration reason: a bare
+// missing snippet is indistinguishable from "the file moved" or "the read
+// failed", and an agent that can't tell them apart either guesses a path (which
+// can silently read the wrong repo's same-named file) or gives up.
+func TestEnrichQueryResponse_NoCheckoutReportsReason(t *testing.T) {
+	const repoID = "foreign-repo-uuid"
+	cfg := Config{
+		RepoRoot:    "/some/cwd/checkout",
+		CWDRepoID:   "cwd-repo-uuid", // NOT repoID, so RepoRoot must not be used
+		RepoScheme:  func(string) (string, bool) { return "none", true },
+		RepoRootFor: func(string) (string, bool) { return "", false }, // nothing known
+	}
+
+	out := enrichQueryResponse(cfg, queryResponse(repoID, "internal/infra/kafka/kafka.go", 1))
+
+	r := firstResult(t, out)
+	if _, ok := r["snippet"]; ok {
+		t.Error("snippet must not be hydrated when no checkout is known")
+	}
+	if got, _ := unmarshalString(r["real_path"]); got != "internal/infra/kafka/kafka.go" {
+		t.Errorf("real_path = %q; want the cleartext token (unmasking needs no disk)", got)
+	}
+	if got, _ := unmarshalString(r["hydration"]); got != hydrationNoCheckout {
+		t.Errorf("hydration = %q, want %q", got, hydrationNoCheckout)
+	}
+}
+
+// Checkout known but the path absent in it (indexed at a ref this tree lacks, or
+// moved since) is a different fix from "no checkout" — fetch vs clone — so it
+// gets its own reason.
+func TestEnrichQueryResponse_MissingFileReportsReason(t *testing.T) {
+	const repoID = "known-repo-uuid"
+	root := t.TempDir() // exists, but the file inside does not
+	cfg := Config{
+		RepoScheme:  func(string) (string, bool) { return "none", true },
+		RepoRootFor: func(string) (string, bool) { return root, true },
+	}
+
+	out := enrichQueryResponse(cfg, queryResponse(repoID, "gone/file.go", 1))
+
+	r := firstResult(t, out)
+	if _, ok := r["snippet"]; ok {
+		t.Error("snippet must not be set when the file is absent")
+	}
+	if got, _ := unmarshalString(r["hydration"]); got != hydrationFileMissing {
+		t.Errorf("hydration = %q, want %q", got, hydrationFileMissing)
+	}
+}
+
+// A successful hydration must NOT carry a hydration reason — the snippet's
+// presence is the signal, and a redundant field would just cost tokens.
+func TestEnrichQueryResponse_HydratedHasNoReason(t *testing.T) {
+	const repoID = "known-repo-uuid"
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\nfunc main() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		RepoScheme:  func(string) (string, bool) { return "none", true },
+		RepoRootFor: func(string) (string, bool) { return root, true },
+	}
+
+	out := enrichQueryResponse(cfg, queryResponse(repoID, "main.go", 1))
+
+	r := firstResult(t, out)
+	if snip, _ := unmarshalString(r["snippet"]); !strings.Contains(snip, "package main") {
+		t.Errorf("snippet = %q; want the file's first lines", snip)
+	}
+	if _, ok := r["hydration"]; ok {
+		t.Error("hydration reason must be absent when the snippet hydrated")
+	}
+}
+
+// An hmac repo whose masking key isn't in this machine's keychain — the common
+// case for a federated hit from a repo the dev has no key for — yields neither a
+// real_path nor a snippet. That is the most ambiguous outcome of all, so it needs
+// a reason too: without one the result is a bare masked token and an agent cannot
+// tell "no key" from "nothing on disk".
+func TestEnrichQueryResponse_UnmaskFailureReportsReason(t *testing.T) {
+	const repoID = "hmac-repo-no-key"
+	root := t.TempDir()
+	cfg := Config{
+		// hmac repo (scheme is not "none"), and the unmasker has no key for it.
+		RepoScheme:  func(string) (string, bool) { return "hmac", true },
+		RepoRootFor: func(string) (string, bool) { return root, true },
+		UnmaskPath:  func(string, int) (string, bool) { return "", false },
+	}
+
+	out := enrichQueryResponse(cfg, queryResponse(repoID, "deadbeeftoken", 1))
+
+	r := firstResult(t, out)
+	if _, ok := r["real_path"]; ok {
+		t.Error("real_path must be absent when unmasking failed")
+	}
+	if _, ok := r["snippet"]; ok {
+		t.Error("snippet must be absent when the real path is unknown")
+	}
+	if got, _ := unmarshalString(r["hydration"]); got != hydrationUnmaskFailed {
+		t.Errorf("hydration = %q, want %q", got, hydrationUnmaskFailed)
+	}
+}
+
+// The file is where the envelope says, but the checkout is at a ref where it is
+// shorter than the indexed range (or line_end is missing/0, which reads nothing).
+// Emitting `"snippet": ""` would read as a successful hydration of an empty
+// region, so the result must carry a reason and no snippet.
+func TestEnrichQueryResponse_RangeNotInFileReportsReason(t *testing.T) {
+	const repoID = "known-repo-uuid"
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "short.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		RepoScheme:  func(string) (string, bool) { return "none", true },
+		RepoRootFor: func(string) (string, bool) { return root, true },
+	}
+
+	env := map[string]any{
+		"status": "ok",
+		"results": []map[string]any{
+			// The file has 1 line; the chunk was indexed at lines 40–48.
+			{"repo_id": repoID, "path_token": "short.go", "line_start": 40, "line_end": 48},
+			// line_end absent entirely — the scan reads nothing at all.
+			{"repo_id": repoID, "path_token": "short.go", "line_start": 1},
+		},
+	}
+	b, _ := json.Marshal(env)
+
+	out := enrichQueryResponse(cfg, b)
+
+	var enriched map[string]json.RawMessage
+	if err := json.Unmarshal(out, &enriched); err != nil {
+		t.Fatalf("unmarshal enriched: %v", err)
+	}
+	var results []map[string]json.RawMessage
+	if err := json.Unmarshal(enriched["results"], &results); err != nil {
+		t.Fatalf("unmarshal results: %v", err)
+	}
+	for i, r := range results {
+		if raw, ok := r["snippet"]; ok {
+			t.Errorf("results[%d]: snippet = %s, want none (range not in file)", i, raw)
+		}
+		if got, _ := unmarshalString(r["hydration"]); got != hydrationRangeMissing {
+			t.Errorf("results[%d]: hydration = %q, want %q", i, got, hydrationRangeMissing)
+		}
+	}
+}
+
+// A range that IS in the file but holds only blank lines is a real (if useless)
+// hydration, not a failure: it must keep the empty-ish snippet and stay
+// reason-free, so the range-missing check can't be a bare `snippet == ""` test.
+func TestEnrichQueryResponse_BlankLinesHydrateWithoutReason(t *testing.T) {
+	const repoID = "known-repo-uuid"
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "blank.go"), []byte("\n\n\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		RepoScheme:  func(string) (string, bool) { return "none", true },
+		RepoRootFor: func(string) (string, bool) { return root, true },
+	}
+
+	out := enrichQueryResponse(cfg, queryResponse(repoID, "blank.go", 1))
+
+	r := firstResult(t, out)
+	if got, ok := unmarshalString(r["snippet"]); !ok || got != "\n" {
+		t.Errorf("snippet = %q (present=%v), want the two blank lines", got, ok)
+	}
+	if _, ok := r["hydration"]; ok {
+		t.Error("hydration reason must be absent when the range was read")
+	}
+}
+
+// firstResult decodes results[0] from an enriched QUERY envelope.
+func firstResult(t *testing.T, out []byte) map[string]json.RawMessage {
+	t.Helper()
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var results []map[string]json.RawMessage
+	if err := json.Unmarshal(env["results"], &results); err != nil {
+		t.Fatalf("unmarshal results: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("no results")
+	}
+	return results[0]
+}
