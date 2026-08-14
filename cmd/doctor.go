@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/codastre/cli/internal/checkouts"
 	"github.com/codastre/cli/internal/git"
 	"github.com/codastre/cli/internal/keychain"
 	"github.com/spf13/cobra"
@@ -129,6 +130,30 @@ func runDoctor(cmd *cobra.Command, _ []string) {
 				findings = append(findings, finding{label: "repo", ok: true, detail: canonical})
 			}
 		}
+	}
+
+	// 4b. Checkout registry: without an entry for a repo, its QUERY results come
+	// back as bare locators — indexed and findable, but with no source. Warn
+	// rather than error, since search still works.
+	registered := checkouts.All()
+	switch {
+	case len(registered) == 0:
+		findings = append(findings, finding{
+			label:   "checkouts",
+			ok:      false,
+			warning: true,
+			detail:  "none registered — results will have no snippets; run `codastre checkout scan <root>`",
+		})
+	default:
+		detail := countLabel(len(registered), "registered checkout")
+		ok := true
+		if _, url, err := repoAt("."); err == nil {
+			if _, known := registered[url]; !known {
+				detail += "; this repo is not one of them — run `codastre checkout add`"
+				ok = false
+			}
+		}
+		findings = append(findings, finding{label: "checkouts", ok: ok, warning: true, detail: detail})
 	}
 
 	// 5. Git version (min 2.30).

@@ -122,6 +122,10 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Logged in. API key stored for %s\n", host)
 		fmt.Fprintf(cmd.OutOrStdout(), "Server %s saved as default; other commands no longer need --server.\n", serverURL)
+		// Auth alone gives searchable results without source; the checkout
+		// registry is what makes them show code. Say so while the user is
+		// still in setup mode.
+		hintCheckouts(cmd.OutOrStdout())
 		return nil
 	}
 

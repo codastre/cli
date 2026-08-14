@@ -50,6 +50,36 @@ func Remember(repoURL, dir string) error {
 	return save(m)
 }
 
+// All returns a copy of the whole registry, so callers can list or audit it
+// without holding the lock or mutating shared state.
+func All() map[string]string {
+	mu.Lock()
+	defer mu.Unlock()
+	m := load()
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// Forget drops repoURL from the registry, reporting whether an entry was
+// actually removed so callers can distinguish "unregistered it" from "it was
+// never there".
+func Forget(repoURL string) (bool, error) {
+	if repoURL == "" {
+		return false, nil
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	m := load()
+	if _, ok := m[repoURL]; !ok {
+		return false, nil
+	}
+	delete(m, repoURL)
+	return true, save(m)
+}
+
 // load reads the registry, returning an empty map on any error (missing file,
 // malformed JSON) so callers always get a usable map.
 func load() map[string]string {
