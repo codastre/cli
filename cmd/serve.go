@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/codastre/cli/internal/checkouts"
@@ -19,10 +20,19 @@ var serveCmd = &cobra.Command{
 
 var serveNoWatch bool
 var serveServerURL string
+var serveMaxSnippetLines int
+var serveNoSnippets bool
+var serveQuiet bool
 
 func init() {
 	serveCmd.Flags().BoolVar(&serveNoWatch, "no-watch", false, "Skip HEAD watcher")
 	serveCmd.Flags().StringVar(&serveServerURL, "server", defaultServerURL(), "Server URL [$CODASTRE_SERVER]")
+	serveCmd.Flags().IntVar(&serveMaxSnippetLines, "max-snippet-lines", defaultMaxSnippetLines(),
+		"Cap each hydrated snippet at N lines; truncated results are marked "+
+			"(0 = built-in default) [$CODASTRE_MAX_SNIPPET_LINES]")
+	serveCmd.Flags().BoolVar(&serveNoSnippets, "no-snippets", defaultNoSnippets(),
+		"Return ranked locations only, without hydrating snippet bodies [$CODASTRE_NO_SNIPPETS]")
+	serveCmd.Flags().BoolVar(&serveQuiet, "quiet", false, "Suppress the per-QUERY cost line on stderr")
 	rootCmd.AddCommand(serveCmd)
 }
 
@@ -61,15 +71,25 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	hy := federatedHydration(serveServerURL, apiKey, repoRoot)
 
+	// Cost log goes to stderr: stdout carries the JSON-RPC stream and any stray
+	// byte on it corrupts the transport.
+	var costLog io.Writer
+	if !serveQuiet {
+		costLog = os.Stderr
+	}
+
 	cfg := mcpshim.Config{
-		ServerURL:     serveServerURL,
-		APIKey:        apiKey,
-		RepoRoot:      repoRoot,
-		UnmaskPath:    setupUnmask(serveServerURL, apiKey, repoRoot, store),
-		RepoScheme:    hy.Scheme,
-		RepoRootFor:   hy.RootFor,
-		RepoRemoteURL: hy.RemoteURL,
-		CWDRepoID:     hy.CWDRepoID,
+		ServerURL:       serveServerURL,
+		APIKey:          apiKey,
+		RepoRoot:        repoRoot,
+		UnmaskPath:      setupUnmask(serveServerURL, apiKey, repoRoot, store),
+		RepoScheme:      hy.Scheme,
+		RepoRootFor:     hy.RootFor,
+		RepoRemoteURL:   hy.RemoteURL,
+		CWDRepoID:       hy.CWDRepoID,
+		MaxSnippetLines: serveMaxSnippetLines,
+		NoSnippets:      serveNoSnippets,
+		Log:             costLog,
 	}
 	return mcpshim.Run(cfg, os.Stdin, os.Stdout)
 }

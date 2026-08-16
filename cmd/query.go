@@ -88,7 +88,12 @@ func init() {
 	f.StringVar(&queryRepoURL, "repo-url", "", "Search a specific repo by URL")
 	f.BoolVar(&queryAll, "all", false, "Search across all visible repos")
 	f.StringVar(&queryRef, "ref", "", "Branch/ref to include its overlay (default: base only)")
-	f.IntVar(&queryTopK, "top-k", 10, "Maximum results (1-50)")
+	// 6, not the tool default of 10 (docs/bugs/query-defaults-token-budget.md, C4).
+	// Measured on a lookup question, every correct answer came from ranks 1-3 and
+	// ranks 4-10 were 70% of the payload and 0% of the answers. 6 rather than 4
+	// keeps a recall margin for vaguer questions, where a second query would erase
+	// the saving. Raise it (or pass --all-style survey flags) for exploration.
+	f.IntVar(&queryTopK, "top-k", 6, "Maximum results (1-50)")
 	f.StringVar(&queryLanguage, "language", "", "Filter by language")
 	f.StringVar(&queryPathPrefix, "path-prefix", "", "Filter by path prefix")
 	f.StringSliceVar(&queryContentKinds, "content-kinds", nil, "Filter by content kinds (repeatable)")

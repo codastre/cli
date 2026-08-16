@@ -1,8 +1,9 @@
 // Package mcpshim implements the stdio MCP proxy (impl-spec §2.7).
 // It reads newline-delimited JSON-RPC from stdin, forwards each message to the
 // server's MCP HTTP endpoint with the auth header, and writes the response to stdout.
-// QUERY responses have their path_tokens unmasked and snippets hydrated from disk.
-// GRAPH responses have their src/dst path_tokens and evidence file_path_tokens unmasked.
+// QUERY responses have their path_tokens unmasked and snippets hydrated from disk
+// (see query.go and snippet.go). GRAPH responses have their src/dst path_tokens
+// and evidence file_path_tokens unmasked (see graph.go).
 package mcpshim
 
 import (
@@ -12,9 +13,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
@@ -48,6 +46,16 @@ type Config struct {
 	// the service without extra calls. The proxy already holds this mapping for
 	// hydration, so it backfills remote_url locally. Nil → no backfill.
 	RepoRemoteURL func(repoID string) (string, bool)
+	// MaxSnippetLines caps how many lines each hydrated snippet may carry.
+	// Zero → defaultMaxSnippetLines. Hydration is where a QUERY response's cost
+	// is incurred, so this is the proxy's cost dial; see snippet.go.
+	MaxSnippetLines int
+	// NoSnippets skips hydration entirely, returning ranked locations only. For
+	// cheap orientation queries where the paths are the answer.
+	NoSnippets bool
+	// Log, when non-nil, receives one human-readable cost line per QUERY
+	// response. Must NOT be stdout: that carries the JSON-RPC stream.
+	Log io.Writer
 }
 
 // Reasons emitted on a QUERY result as `hydration` when no snippet could be
@@ -75,6 +83,10 @@ const (
 	// path is unknown. `codastre masking-key --repo-url …` is the fix when the dev
 	// is entitled to the repo.
 	hydrationUnmaskFailed = "path_unmask_failed"
+	// Hydration was switched off by the operator (`serve --no-snippets`). Not a
+	// failure: the paths and spans are complete and the agent should Read what it
+	// needs rather than trying to repair anything.
+	hydrationSnippetsDisabled = "snippets_disabled"
 )
 
 // canEnrich reports whether the proxy has any way to produce real paths /
@@ -139,6 +151,10 @@ func Run(cfg Config, in io.Reader, out io.Writer) error {
 		if len(line) == 0 {
 			continue
 		}
+		// Client-only hydration arguments are consumed here and stripped from
+		// the request: they have no server-side counterpart and would fail the
+		// QUERY tool's schema validation. See overrides.go.
+		line, ov := takeHydrationOverrides(line)
 		resp, err := forwardMessage(cfg, line)
 		if err != nil {
 			resp = errorEnvelope(line, err)
@@ -149,7 +165,7 @@ func Run(cfg Config, in io.Reader, out io.Writer) error {
 			if len(bytes.TrimSpace(resp)) == 0 {
 				continue
 			}
-			resp = enrichResponse(cfg, resp)
+			resp = enrichResponse(ov.apply(cfg), resp)
 		}
 		fmt.Fprintf(out, "%s\n", resp)
 	}
@@ -319,275 +335,6 @@ func blockType(block map[string]json.RawMessage) string {
 	return t
 }
 
-// enrichQueryResponse unmasks path_tokens and hydrates snippets in QUERY responses.
-func enrichQueryResponse(cfg Config, data []byte) []byte {
-	if !cfg.canEnrich() {
-		return data
-	}
-
-	var env map[string]json.RawMessage
-	if err := json.Unmarshal(data, &env); err != nil {
-		return data
-	}
-	resultsRaw, ok := env["results"]
-	if !ok {
-		return data
-	}
-
-	var results []map[string]json.RawMessage
-	if err := json.Unmarshal(resultsRaw, &results); err != nil {
-		return data
-	}
-
-	// The index-free (federated) QUERY path returns mask_key_rev: null and puts
-	// the authoritative version in the per-repo map mask_key_revs. Resolve each
-	// result at its own repo's rev so a key rotation is honoured; fall back to
-	// the singular field (Mode A, single-index queries).
-	var maskKeyRev int
-	if raw, ok := env["mask_key_rev"]; ok {
-		_ = json.Unmarshal(raw, &maskKeyRev)
-	}
-	maskKeyRevs := map[string]int{}
-	if raw, ok := env["mask_key_revs"]; ok {
-		_ = json.Unmarshal(raw, &maskKeyRevs)
-	}
-
-	for i, r := range results {
-		var pathToken string
-		if raw, ok := r["path_token"]; ok {
-			_ = json.Unmarshal(raw, &pathToken)
-		}
-		rev := maskKeyRev
-		var repoID string
-		if raw, ok := r["repo_id"]; ok {
-			_ = json.Unmarshal(raw, &repoID)
-		}
-		if v, ok := maskKeyRevs[repoID]; ok {
-			rev = v
-		}
-		// hmac → inverse-HMAC via UnmaskPath; none → identity (token is cleartext).
-		realPath, ok := cfg.unmaskOrIdentity(pathToken, repoID, rev)
-		if !ok {
-			// No real path, so no snippet either — but the result must still say
-			// why, or it lands in exactly the ambiguous state the `hydration`
-			// field exists to remove (see the invariant above).
-			r["hydration"], _ = json.Marshal(hydrationUnmaskFailed)
-			results[i] = r
-			continue
-		}
-		r["real_path"], _ = json.Marshal(realPath)
-
-		// Snippet hydration (impl-spec §2.7). Independent of masking — it needs
-		// only a local checkout root, resolved per-repo so federated hits hydrate
-		// too. When hydration can't happen the result still carries real_path, plus
-		// a `hydration` reason so the agent can act instead of guessing: a missing
-		// snippet is otherwise indistinguishable from "this repo isn't checked out",
-		// "the file moved", and "the read failed" — three cases with three fixes.
-		root := cfg.rootFor(repoID)
-		if root == "" {
-			r["hydration"], _ = json.Marshal(hydrationNoCheckout)
-		} else {
-			var lineStart, lineEnd int
-			var blobSHA string
-			if raw, ok := r["line_start"]; ok {
-				_ = json.Unmarshal(raw, &lineStart)
-			}
-			if raw, ok := r["line_end"]; ok {
-				_ = json.Unmarshal(raw, &lineEnd)
-			}
-			if raw, ok := r["blob_sha"]; ok {
-				_ = json.Unmarshal(raw, &blobSHA)
-			}
-
-			absPath := filepath.Join(root, realPath)
-			res, err := hydrateSnippet(absPath, lineStart, lineEnd, blobSHA)
-			switch {
-			case err == nil && res.Lines == 0:
-				// File read fine, but the range wasn't in it. Emitting
-				// `"snippet": ""` here would look like a successful hydration of an
-				// empty region, so report the reason instead.
-				r["hydration"], _ = json.Marshal(hydrationRangeMissing)
-			case err == nil:
-				r["snippet"], _ = json.Marshal(res.Text)
-				if res.Stale {
-					r["stale"], _ = json.Marshal(true)
-				}
-			case os.IsNotExist(err):
-				// Checkout known, file absent: indexed at a ref this checkout
-				// doesn't have, or deleted/moved since. Pulling usually fixes it.
-				r["hydration"], _ = json.Marshal(hydrationFileMissing)
-			default:
-				r["hydration"], _ = json.Marshal(hydrationReadError)
-			}
-		}
-		results[i] = r
-	}
-
-	enriched, _ := json.Marshal(results)
-	env["results"] = enriched
-	out, _ := json.Marshal(env)
-	return out
-}
-
-// enrichGraphResponse unmasks src/dst path_tokens and evidence file_path_tokens
-// in GRAPH responses. For each edge:
-//   - src["path_token"] -> src["real_path"] (if UnmaskPath returns ok)
-//   - dst["path_token"] -> dst["real_path"] (if UnmaskPath returns ok)
-//   - evidence["file_path_token"] -> evidence["real_file_path"] (if present and ok)
-//
-// Each endpoint is unmasked at its OWN repo's mask_key_rev, read from the
-// response's repos map ({repo_id: {masking_scheme, mask_key_rev}}). The old
-// hardcoded rev 0 silently wrong-unmasked rotated hmac repos (corpus-hygiene
-// plan API3); repos absent from the map (or a missing map) still fall back to 0.
-func enrichGraphResponse(cfg Config, data []byte) []byte {
-	if !cfg.canEnrich() {
-		return data
-	}
-
-	var env map[string]json.RawMessage
-	if err := json.Unmarshal(data, &env); err != nil {
-		return data
-	}
-	edgesRaw, ok := env["edges"]
-	if !ok {
-		return data
-	}
-
-	// Each element is a graph_edge_result: {edge, src, dst, count, evidence?}
-	var edges []map[string]json.RawMessage
-	if err := json.Unmarshal(edgesRaw, &edges); err != nil {
-		return data
-	}
-
-	// repo_id -> mask_key_rev from the envelope's repos map.
-	repoRevs := map[string]int{}
-	if reposRaw, ok := env["repos"]; ok {
-		var repos map[string]struct {
-			MaskKeyRev int `json:"mask_key_rev"`
-		}
-		if err := json.Unmarshal(reposRaw, &repos); err == nil {
-			for rid, info := range repos {
-				repoRevs[rid] = info.MaskKeyRev
-			}
-		}
-	}
-
-	// unmaskNode unmasks node[tokenField] into node[realField] at the node's
-	// own repo rev; returns the repo's rev for reuse (evidence rides src's repo).
-	unmaskNode := func(e map[string]json.RawMessage, key, tokenField, realField string) int {
-		rev := 0
-		raw, ok := e[key]
-		if !ok {
-			return rev
-		}
-		var node map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &node); err != nil {
-			return rev
-		}
-		repoID, _ := unmarshalString(node["repo_id"])
-		if r, ok := repoRevs[repoID]; ok {
-			rev = r
-		}
-		if tok, ok := unmarshalString(node[tokenField]); ok {
-			// hmac → UnmaskPath; none → identity (token is the real path).
-			if realPath, ok := cfg.unmaskOrIdentity(tok, repoID, rev); ok {
-				node[realField], _ = json.Marshal(realPath)
-				e[key], _ = json.Marshal(node)
-			}
-		}
-		return rev
-	}
-
-	for i, e := range edges {
-		srcRev := unmaskNode(e, "src", "path_token", "real_path")
-		unmaskNode(e, "dst", "path_token", "real_path")
-
-		// Unmask evidence.file_path_token -> evidence.real_file_path (optional
-		// field). Evidence is the SRC side's call site, so it unmasks at the src
-		// repo's rev and scheme (identity for a `none`-scheme src repo).
-		if evRaw, ok := e["evidence"]; ok {
-			var ev map[string]json.RawMessage
-			if err := json.Unmarshal(evRaw, &ev); err == nil {
-				if tok, ok := unmarshalString(ev["file_path_token"]); ok {
-					if realPath, ok := cfg.unmaskOrIdentity(tok, edgeNodeRepoID(e, "src"), srcRev); ok {
-						ev["real_file_path"], _ = json.Marshal(realPath)
-						e["evidence"], _ = json.Marshal(ev)
-					}
-				}
-			}
-		}
-
-		edges[i] = e
-	}
-
-	enriched, _ := json.Marshal(edges)
-	env["edges"] = enriched
-	if repos, ok := backfillRepoURLs(cfg, env["repos"]); ok {
-		env["repos"] = repos
-	}
-	out, _ := json.Marshal(env)
-	return out
-}
-
-// backfillRepoURLs adds remote_url to each entry of a GRAPH repos map, which the
-// server populates with only {masking_scheme, mask_key_rev}. Without it a
-// federated edge names its endpoints by bare UUID, so "which service consumes
-// this topic?" can't be answered from the response — the agent has to spend extra
-// calls, or guess a service from a shared path like app/consumer.py. The proxy
-// already holds repo_id → remote_url for hydration, so it fills the gap locally
-// and matches QUERY's repos map, where remote_url is present.
-//
-// Existing keys are never overwritten: if a future server version starts sending
-// remote_url, its value wins.
-func backfillRepoURLs(cfg Config, reposRaw json.RawMessage) (json.RawMessage, bool) {
-	if cfg.RepoRemoteURL == nil || len(reposRaw) == 0 {
-		return nil, false
-	}
-	var repos map[string]map[string]json.RawMessage
-	if err := json.Unmarshal(reposRaw, &repos); err != nil || len(repos) == 0 {
-		return nil, false
-	}
-	changed := false
-	for repoID, info := range repos {
-		if info == nil {
-			info = map[string]json.RawMessage{}
-		}
-		if _, exists := info["remote_url"]; exists {
-			continue
-		}
-		url, ok := cfg.RepoRemoteURL(repoID)
-		if !ok || url == "" {
-			continue
-		}
-		info["remote_url"], _ = json.Marshal(url)
-		repos[repoID] = info
-		changed = true
-	}
-	if !changed {
-		return nil, false
-	}
-	b, err := json.Marshal(repos)
-	if err != nil {
-		return nil, false
-	}
-	return b, true
-}
-
-// edgeNodeRepoID returns the repo_id of an edge's "src"/"dst" node, or "" when
-// absent. Used to pick the masking scheme for evidence (which rides the src repo).
-func edgeNodeRepoID(e map[string]json.RawMessage, key string) string {
-	raw, ok := e[key]
-	if !ok {
-		return ""
-	}
-	var node map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &node); err != nil {
-		return ""
-	}
-	id, _ := unmarshalString(node["repo_id"])
-	return id
-}
-
 // unmarshalString extracts a Go string from a json.RawMessage.
 // Returns ("", false) if raw is nil or not a JSON string.
 func unmarshalString(raw json.RawMessage) (string, bool) {
@@ -599,72 +346,6 @@ func unmarshalString(raw json.RawMessage) (string, bool) {
 		return "", false
 	}
 	return s, true
-}
-
-// snippetResult is hydrateSnippet's outcome. Lines counts the lines actually
-// read from the requested range, so the caller can tell "the range yielded
-// nothing" (missing/zero line_end, or a checkout where the file is shorter than
-// line_start) from "the range is genuinely blank lines" — the former is a
-// hydration failure that needs a reason, not an empty success.
-type snippetResult struct {
-	Text  string
-	Lines int
-	Stale bool
-}
-
-// hydrateSnippet reads the inclusive, 1-based line range [lineStart, lineEnd]
-// from the file and checks staleness. The server's chunk ranges are 1-based
-// (see the proxy_query_test fixtures); a stray line_start of 0 is clamped to 1
-// so the first line is included rather than skipped. (If a future server change
-// switches to 0-based ranges, this is the one place to revisit.)
-func hydrateSnippet(absPath string, lineStart, lineEnd int, blobSHA string) (snippetResult, error) {
-	if lineStart < 1 {
-		lineStart = 1
-	}
-	f, err := os.Open(absPath)
-	if err != nil {
-		return snippetResult{}, err
-	}
-	defer f.Close()
-
-	sc := bufio.NewScanner(f)
-	var lines []string
-	lineNum := 1
-	for sc.Scan() {
-		if lineNum >= lineStart && lineNum <= lineEnd {
-			lines = append(lines, sc.Text())
-		}
-		if lineNum > lineEnd {
-			break
-		}
-		lineNum++
-	}
-	if err := sc.Err(); err != nil {
-		return snippetResult{}, err
-	}
-	if len(lines) == 0 {
-		return snippetResult{}, nil
-	}
-
-	out := snippetResult{Text: strings.Join(lines, "\n"), Lines: len(lines)}
-
-	// Staleness check: compare current blob hash to expected.
-	if blobSHA != "" {
-		current, err := currentBlobSHA(absPath)
-		if err == nil && current != blobSHA {
-			out.Stale = true
-		}
-	}
-
-	return out, nil
-}
-
-func currentBlobSHA(absPath string) (string, error) {
-	out, err := exec.Command("git", "hash-object", absPath).Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
 }
 
 // errorEnvelope extracts the JSON-RPC id from req and wraps err as a JSON-RPC error.

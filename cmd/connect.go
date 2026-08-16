@@ -41,6 +41,8 @@ var connectServerURL string
 var connectName string
 var connectScope string
 var connectStdio bool
+var connectMaxSnippetLines int
+var connectNoSnippets bool
 
 func init() {
 	connectCmd.Flags().StringVar(&connectServerURL, "server", defaultServerURL(), "Server URL [$CODASTRE_SERVER]")
@@ -50,6 +52,10 @@ func init() {
 			` or project (.mcp.json in CWD). Only applies to the 'claude' target.`)
 	connectCmd.Flags().BoolVar(&connectStdio, "stdio", false,
 		"Write a local-proxy (codastre serve) config instead of direct HTTP. Required for hmac-masked repos.")
+	connectCmd.Flags().IntVar(&connectMaxSnippetLines, "max-snippet-lines", 0,
+		"Bake `serve --max-snippet-lines N` into the generated stdio config (0 = omit)")
+	connectCmd.Flags().BoolVar(&connectNoSnippets, "no-snippets", false,
+		"Bake `serve --no-snippets` into the generated stdio config (ranked locations only)")
 	rootCmd.AddCommand(connectCmd)
 }
 

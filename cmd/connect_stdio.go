@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -24,6 +26,28 @@ func codastreBinary() string {
 	return exe
 }
 
+// serveArgs builds the `codastre serve` argv baked into a generated stdio MCP
+// config. Snippet-hydration flags are appended only when the operator asked for
+// them, so a config generated without them is byte-identical to what earlier
+// versions wrote — and stays legible as "the defaults" rather than pinning a
+// budget that a future release might tune.
+//
+// Baking them in is the only way an agent client that launches the proxy itself
+// can carry a non-default budget: MCP stdio args are fixed at config time.
+// $CODASTRE_MAX_SNIPPET_LINES / $CODASTRE_NO_SNIPPETS cover the case where the
+// config is not ours to edit, and per-call QUERY arguments cover the case where
+// the right budget depends on the question (mcpshim/overrides.go).
+func serveArgs(serverURL string) []string {
+	args := []string{"serve", "--server", serverURL}
+	if connectNoSnippets {
+		args = append(args, "--no-snippets")
+	}
+	if connectMaxSnippetLines > 0 {
+		args = append(args, "--max-snippet-lines", strconv.Itoa(connectMaxSnippetLines))
+	}
+	return args
+}
+
 // claudeEntry builds the mcpServers entry for the claude config (the same JSON
 // shape Claude Code expects). In stdio mode the agent launches `codastre serve`
 // (which unmasks paths, hydrates snippets, and auto-syncs); in HTTP mode it
@@ -33,7 +57,7 @@ func claudeEntry(mcpURL, serverURL, apiKey string, stdio bool) map[string]any {
 		return map[string]any{
 			"type":    "stdio",
 			"command": codastreBinary(),
-			"args":    []string{"serve", "--server", serverURL},
+			"args":    serveArgs(serverURL),
 		}
 	}
 	return map[string]any{
@@ -51,7 +75,7 @@ func opencodeEntry(mcpURL, serverURL, apiKey string, stdio bool) map[string]any 
 	if stdio {
 		return map[string]any{
 			"type":    "local",
-			"command": []string{codastreBinary(), "serve", "--server", serverURL},
+			"command": append([]string{codastreBinary()}, serveArgs(serverURL)...),
 			"enabled": true,
 		}
 	}
@@ -68,8 +92,12 @@ func opencodeEntry(mcpURL, serverURL, apiKey string, stdio bool) map[string]any 
 // `codastre serve`. No bearer token is written — serve reads the API key from
 // the OS keychain at runtime.
 func codexStdioSection(name, serverURL string) string {
-	return fmt.Sprintf("[mcp_servers.%s]\ncommand = %q\nargs = [\"serve\", \"--server\", %q]\n",
-		name, codastreBinary(), serverURL)
+	quoted := make([]string, 0, len(serveArgs(serverURL)))
+	for _, a := range serveArgs(serverURL) {
+		quoted = append(quoted, fmt.Sprintf("%q", a))
+	}
+	return fmt.Sprintf("[mcp_servers.%s]\ncommand = %q\nargs = [%s]\n",
+		name, codastreBinary(), strings.Join(quoted, ", "))
 }
 
 // printModeHint writes a one-line reminder about what the chosen mode does, so
