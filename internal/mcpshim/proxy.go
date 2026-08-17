@@ -165,6 +165,10 @@ func Run(cfg Config, in io.Reader, out io.Writer) error {
 			if len(bytes.TrimSpace(resp)) == 0 {
 				continue
 			}
+			// tools/list is annotated with the client-only hydration arguments
+			// so agents can discover them (see toolschema.go); tool results are
+			// unmasked and hydrated.
+			resp = annotateToolList(cfg, resp)
 			resp = enrichResponse(ov.apply(cfg), resp)
 		}
 		fmt.Fprintf(out, "%s\n", resp)
