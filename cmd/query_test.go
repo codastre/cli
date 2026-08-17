@@ -104,7 +104,7 @@ func TestRenderQueryHuman_MultiRepo(t *testing.T) {
 	})
 
 	var buf bytes.Buffer
-	if err := renderQueryHuman(&buf, payload, nil); err != nil {
+	if err := renderQueryHuman(&buf, payload, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -135,7 +135,7 @@ func TestRenderQueryHuman_DocumentTitle(t *testing.T) {
 	})
 
 	var buf bytes.Buffer
-	if err := renderQueryHuman(&buf, payload, nil); err != nil {
+	if err := renderQueryHuman(&buf, payload, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -161,7 +161,7 @@ func TestRenderQueryHuman_Empty(t *testing.T) {
 		"results":        []any{},
 	})
 	var buf bytes.Buffer
-	if err := renderQueryHuman(&buf, payload, nil); err != nil {
+	if err := renderQueryHuman(&buf, payload, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "No matches.") {
@@ -278,7 +278,7 @@ func TestRenderQueryHuman_Unmask(t *testing.T) {
 		return "", false
 	}
 	var buf bytes.Buffer
-	if err := renderQueryHuman(&buf, payload, unmask); err != nil {
+	if err := renderQueryHuman(&buf, payload, unmask, false); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -294,4 +294,38 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// The tri-state resolver: --format grew a third value, and a bool cannot carry
+// three. The legacy --json flag stays a synonym for --format json.
+func TestResolveFormat(t *testing.T) {
+	cases := []struct {
+		flag   bool
+		format string
+		want   string
+		errs   bool
+	}{
+		{false, "human", formatHuman, false},
+		{false, "", formatHuman, false},
+		{true, "", formatJSON, false},
+		{true, "human", formatJSON, false},
+		{false, "json", formatJSON, false},
+		{false, "agent", formatAgent, false},
+		// An explicit format wins over the legacy bool: the specific flag beats
+		// the general one, whichever order they were typed in.
+		{true, "agent", formatAgent, false},
+		{false, "xml", "", true},
+	}
+	for _, c := range cases {
+		got, err := resolveFormat(c.flag, c.format)
+		if c.errs {
+			if err == nil {
+				t.Errorf("resolveFormat(%v,%q): expected error", c.flag, c.format)
+			}
+			continue
+		}
+		if err != nil || got != c.want {
+			t.Errorf("resolveFormat(%v,%q) = %q,%v; want %q", c.flag, c.format, got, err, c.want)
+		}
+	}
 }

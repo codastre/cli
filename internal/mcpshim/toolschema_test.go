@@ -2,6 +2,7 @@ package mcpshim
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -155,4 +156,84 @@ func TestAnnotateToolList_KeepsServerDefinition(t *testing.T) {
 	if _, ok := props[argMaxSnippetLines]; !ok {
 		t.Errorf("%q missing: the proxy should still add what the server omits", argMaxSnippetLines)
 	}
+}
+
+// `format` belongs to the server. The proxy adds only the value it implements,
+// so the caller sees one argument with three rungs rather than two arguments
+// with overlapping names.
+func TestAnnotateToolList_ExtendsFormatEnum(t *testing.T) {
+	cfg := Config{RepoScheme: func(string) (string, bool) { return "none", true }}
+	in := toolListResponse(t, "QUERY")
+	// Add the server's own format property to the fixture schema.
+	in = withFormatProperty(t, in, `{"type":"string","enum":["verbose","compact"],
+	  "description":"Result-item shape."}`)
+
+	props := toolSchemaProps(t, annotateToolList(cfg, in), "QUERY")
+
+	var format struct {
+		Enum        []string `json:"enum"`
+		Description string   `json:"description"`
+	}
+	if err := json.Unmarshal(props[argFormat], &format); err != nil {
+		t.Fatalf("unmarshal format property: %v", err)
+	}
+	if got := strings.Join(format.Enum, ","); got != "verbose,compact,agent" {
+		t.Errorf("enum = %q, want the server's values plus agent", got)
+	}
+	// The server's description is extended, not replaced — it owns the meaning
+	// of the two values it implements.
+	if !strings.HasPrefix(format.Description, "Result-item shape.") {
+		t.Errorf("server description was replaced: %q", format.Description)
+	}
+	if !strings.Contains(format.Description, "'agent'") {
+		t.Errorf("agent is in the enum but undocumented: %q", format.Description)
+	}
+}
+
+// A server that has not shipped `format` has no property to extend. Advertising
+// one anyway would promise a compaction nothing implements.
+func TestAnnotateToolList_NoFormatPropertyToExtend(t *testing.T) {
+	cfg := Config{RepoScheme: func(string) (string, bool) { return "none", true }}
+
+	props := toolSchemaProps(t, annotateToolList(cfg, toolListResponse(t, "QUERY")), "QUERY")
+
+	if _, ok := props[argFormat]; ok {
+		t.Error("format advertised against a server that does not accept it")
+	}
+	// The client-only arguments are still added: those the proxy does implement.
+	if _, ok := props[argSnippets]; !ok {
+		t.Error("snippets should still be advertised")
+	}
+}
+
+// withFormatProperty injects a `format` property into the fixture's QUERY schema.
+func withFormatProperty(t *testing.T, data []byte, propJSON string) []byte {
+	t.Helper()
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(data, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(env["result"], &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	var tools []map[string]json.RawMessage
+	if err := json.Unmarshal(result["tools"], &tools); err != nil {
+		t.Fatalf("unmarshal tools: %v", err)
+	}
+	var schema map[string]json.RawMessage
+	if err := json.Unmarshal(tools[0]["inputSchema"], &schema); err != nil {
+		t.Fatalf("unmarshal schema: %v", err)
+	}
+	var props map[string]json.RawMessage
+	if err := json.Unmarshal(schema["properties"], &props); err != nil {
+		t.Fatalf("unmarshal properties: %v", err)
+	}
+	props[argFormat] = json.RawMessage(propJSON)
+	schema["properties"], _ = json.Marshal(props)
+	tools[0]["inputSchema"], _ = json.Marshal(schema)
+	result["tools"], _ = json.Marshal(tools)
+	env["result"], _ = json.Marshal(result)
+	out, _ := json.Marshal(env)
+	return out
 }

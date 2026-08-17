@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/codastre/cli/internal/mcpclient"
+	"github.com/codastre/cli/internal/mcpshim"
 	"github.com/spf13/cobra"
 )
 
@@ -44,6 +46,12 @@ Reading the output:
     from a previous in-repo run, or one you point at with --repo-path <dir>.
     Best-effort: tokens for files not in that checkout stay masked. Pass
     --no-unmask to skip it, or --json for the raw envelope (always masked).
+  • output is ranked locations by default. --snippets additionally reads each
+    hit's body from your local checkout and prints it under the location with
+    real file line numbers; --max-snippet-lines N caps long ones. The server
+    never sends source — it only says where to look — so a hit from a repo you
+    have no clone of shows a short reason instead of a body. --json is never
+    hydrated.
 
 Auth resolves in order: --key, $CODASTRE_API_KEY, then the OS keychain / file
 fallback populated by 'codastre login'.
@@ -55,29 +63,32 @@ Examples:
   codastre query "retry policy" --index-id 1f2e... --top-k 20
   codastre query "consumers lagging" --content-kinds runbook            # find the runbook
   codastre query "page fired" --alert-ids KAFKA-1024 --content-kinds runbook  # exact alert lookup
-  codastre query "parse config" --language go --json       # raw envelope for agents`,
+  codastre query "parse config" --language go --format agent  # compact text for agents
+  codastre query "recall service" --snippets                  # print the bodies too`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runQuery,
 }
 
 var (
-	queryServerURL    string
-	queryKey          string
-	queryIndexID      string
-	queryRepoURL      string
-	queryAll          bool
-	queryRef          string
-	queryTopK         int
-	queryLanguage     string
-	queryPathPrefix   string
-	queryContentKinds []string
-	queryAlertIDs     []string
-	queryErrorCodes   []string
-	queryJSON         bool
-	queryFormat       string
-	queryNoUnmask     bool
-	queryRepoPath     string
+	queryServerURL       string
+	queryKey             string
+	queryIndexID         string
+	queryRepoURL         string
+	queryAll             bool
+	queryRef             string
+	queryTopK            int
+	queryLanguage        string
+	queryPathPrefix      string
+	queryContentKinds    []string
+	queryAlertIDs        []string
+	queryErrorCodes      []string
+	queryJSON            bool
+	queryFormat          string
+	queryNoUnmask        bool
+	queryRepoPath        string
+	querySnippets        bool
+	queryMaxSnippetLines int
 )
 
 func init() {
@@ -100,14 +111,20 @@ func init() {
 	f.StringSliceVar(&queryAlertIDs, "alert-ids", nil, "Exact-match runbooks carrying these alert ids, e.g. KAFKA-1024 (repeatable)")
 	f.StringSliceVar(&queryErrorCodes, "error-codes", nil, "Exact-match runbooks carrying these error codes, e.g. ERR_CONSUMER_LAG (repeatable)")
 	f.BoolVar(&queryJSON, "json", false, "Emit the raw JSON envelope instead of human output")
-	f.StringVar(&queryFormat, "format", "human", "Output format: human | json")
+	f.StringVar(&queryFormat, "format", "human", "Output format: human | json | agent (compact text for agents)")
 	f.BoolVar(&queryNoUnmask, "no-unmask", false, "Show raw masked path_tokens; skip unmasking to real paths")
-	f.StringVar(&queryRepoPath, "repo-path", "", "Local checkout of the queried repo to unmask against (when run outside it)")
+	f.StringVar(&queryRepoPath, "repo-path", "", "Local checkout of the queried repo to unmask against and hydrate from (when run outside it)")
+	f.BoolVar(&querySnippets, "snippets", defaultQuerySnippets(),
+		"Read each hit's body from your local checkout and print it under the "+
+			"location [$CODASTRE_QUERY_SNIPPETS]")
+	f.IntVar(&queryMaxSnippetLines, "max-snippet-lines", defaultMaxSnippetLines(),
+		"With --snippets, cap each body at N lines; truncated ones say where the "+
+			"rest is (0 = built-in default) [$CODASTRE_MAX_SNIPPET_LINES]")
 	rootCmd.AddCommand(queryCmd)
 }
 
 func runQuery(cmd *cobra.Command, args []string) error {
-	asJSON, err := wantJSON(queryJSON, queryFormat)
+	format, err := resolveFormat(queryJSON, queryFormat)
 	if err != nil {
 		return err
 	}
@@ -155,7 +172,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		return queryErrorHint(err)
 	}
 
-	if asJSON {
+	if format == formatJSON {
 		// --json is a raw passthrough of the server envelope (path_tokens intact),
 		// so agents that parse it can unmask themselves via the proxy or keychain.
 		return printJSON(cmd.OutOrStdout(), payload)
@@ -165,7 +182,89 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	if !queryNoUnmask {
 		unmask = resolveUnmask(cmd.ErrOrStderr(), tgt, queryRepoPath, queryServerURL, apiKey)
 	}
-	return renderQueryHuman(cmd.OutOrStdout(), payload, unmask)
+	// Hydration, on request. This command talks to the server directly, so no
+	// proxy has enriched the envelope — the server ships (path_token, span,
+	// score) and nothing else, because it never holds the source. Reading the
+	// spans here is what turns a list of coordinates into an answer, and
+	// --snippets is what asks for it: the default output is a ranked list to
+	// scan, and six bodies is six screenfuls.
+	//
+	// --no-unmask suppresses it even when asked, and not as a shortcut:
+	// unmasking is HOW a token becomes a path that can be opened. Hydrating
+	// anyway would report "path_unmask_failed" on every hit of an hmac repo — a
+	// failure to repair, when it was the caller's own choice.
+	noSnippets := !querySnippets || queryNoUnmask
+	if !noSnippets {
+		payload = hydrateQuery(payload, tgt, apiKey, unmask)
+	}
+
+	if format == formatAgent {
+		text, ok := mcpshim.RenderQueryText(payload, mcpshim.RenderOptions{
+			NoSnippets: noSnippets,
+			// Still passed: hydration writes real_path only where it could
+			// resolve one, and the renderer unmasks what is left over.
+			Unmask: unmask,
+		})
+		if !ok {
+			return fmt.Errorf("decode QUERY response for --format agent")
+		}
+		_, err := fmt.Fprint(cmd.OutOrStdout(), text)
+		return err
+	}
+	return renderQueryHuman(cmd.OutOrStdout(), payload, unmask, noSnippets)
+}
+
+// hydrateQuery reads each result's line span from a local checkout, returning
+// the enriched envelope. Best-effort by construction: a repo with no checkout
+// here keeps its ranked location and gains a `hydration` reason saying why there
+// is no body.
+func hydrateQuery(
+	payload json.RawMessage,
+	tgt target,
+	apiKey string,
+	unmask func(pathToken string, maskKeyRev int) (string, bool),
+) json.RawMessage {
+	repoRoot, _ := findGitRoot(".")
+	hy := queryHydration(queryServerURL, apiKey, queryRepoPath, tgt)
+	return mcpshim.HydrateQueryPayload(mcpshim.Config{
+		RepoRoot:        repoRoot,
+		UnmaskPath:      unmask,
+		RepoScheme:      hy.Scheme,
+		RepoRootFor:     hy.RootFor,
+		CWDRepoID:       hy.CWDRepoID,
+		MaxSnippetLines: queryMaxSnippetLines,
+	}, payload)
+}
+
+// queryHydration builds the per-repo scheme/root lookups for a one-shot query,
+// layering --repo-path on top of the CWD-and-registry roots `serve` uses.
+//
+// --repo-path is the one checkout the registry cannot know about, and this
+// command accepts it precisely for the case of running outside the target repo.
+// It is validated the same way unmasking validates it — a directory that is not
+// a clone of the target is ignored rather than joined onto that repo's paths,
+// which would read a real but wrong file from a correct-looking path. The
+// mismatch goes unwarned here only because resolveUnmask has already said it.
+func queryHydration(serverURL, apiKey, repoPath string, tgt target) hydrationLookups {
+	cwdRoot, _ := findGitRoot(".")
+	hy := federatedHydration(serverURL, apiKey, cwdRoot)
+	if repoPath == "" || tgt.repoURL == "" || hy.RemoteURL == nil {
+		return hy
+	}
+	if !dirMatchesRepo(repoPath, tgt.repoURL) {
+		return hy
+	}
+	remoteURL, registryRoot := hy.RemoteURL, hy.RootFor
+	hy.RootFor = func(repoID string) (string, bool) {
+		if url, ok := remoteURL(repoID); ok && url == tgt.repoURL {
+			return repoPath, true
+		}
+		if registryRoot == nil {
+			return "", false
+		}
+		return registryRoot(repoID)
+	}
+	return hy
 }
 
 // queryErrorHint augments known tool errors with an actionable next step.
@@ -184,14 +283,43 @@ func queryErrorHint(err error) error {
 	return err
 }
 
-// wantJSON resolves the --json / --format flags into a single boolean.
+// Output formats for `codastre query`. `agent` is a third value of the existing
+// --format enum rather than a new mechanism: the same rendering the MCP proxy
+// emits (mcpshim/render.go), so a person and an agent reading the CLI see the
+// same two shapes the MCP path offers.
+const (
+	formatHuman = "human"
+	formatJSON  = "json"
+	formatAgent = "agent"
+)
+
+// wantJSON is the two-shape resolver, for commands with no agent rendering.
+// GRAPH is one: it returns edges and never bodies, so it has none of the
+// JSON-escaping cost that motivates the text shape (plan open question 4).
 func wantJSON(jsonFlag bool, format string) (bool, error) {
 	switch format {
-	case "json":
+	case formatJSON:
 		return true, nil
-	case "human", "":
+	case formatHuman, "":
 		return jsonFlag, nil
 	default:
 		return false, fmt.Errorf("invalid --format %q: want human or json", format)
+	}
+}
+
+// resolveFormat resolves the --json / --format flags into one format. It is
+// tri-state because a bool cannot express three: the legacy --json bool folds
+// in as a synonym for --format json when no explicit format was given.
+func resolveFormat(jsonFlag bool, format string) (string, error) {
+	switch format {
+	case formatJSON, formatAgent:
+		return format, nil
+	case formatHuman, "":
+		if jsonFlag {
+			return formatJSON, nil
+		}
+		return formatHuman, nil
+	default:
+		return "", fmt.Errorf("invalid --format %q: want human, json or agent", format)
 	}
 }

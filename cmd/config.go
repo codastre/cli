@@ -48,3 +48,31 @@ func defaultNoSnippets() bool {
 	}
 	return false
 }
+
+// defaultQuerySnippets reads $CODASTRE_QUERY_SNIPPETS: whether `codastre query`
+// hydrates bodies without being asked. Unset is false — the command's default
+// output is a ranked list a person scans, and bodies turn each entry into a
+// screenful. The proxy defaults the other way, because there the caller is an
+// agent that would otherwise spend a second round trip reading the file itself.
+//
+// Its own variable rather than a reading of $CODASTRE_NO_SNIPPETS: that one is
+// the operator's floor for `serve`, and a negative flag cannot express "on" for
+// a command whose default is off.
+func defaultQuerySnippets() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CODASTRE_QUERY_SNIPPETS"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// defaultQueryFormat reads $CODASTRE_QUERY_FORMAT: how `serve` encodes QUERY
+// results when the caller does not say. "agent" is the text rendering; anything
+// else (including unset) is the JSON envelope, which stays the default until
+// measurement justifies flipping it.
+func defaultQueryFormat() string {
+	if strings.ToLower(strings.TrimSpace(os.Getenv("CODASTRE_QUERY_FORMAT"))) == "agent" {
+		return "agent"
+	}
+	return "json"
+}

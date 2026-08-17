@@ -71,7 +71,7 @@ func TestRenderQueryHuman_ScopedEnvelopeSearchedCount(t *testing.T) {
 		"results":             []any{},
 	})
 	var buf bytes.Buffer
-	if err := renderQueryHuman(&buf, payload, nil); err != nil {
+	if err := renderQueryHuman(&buf, payload, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), "searched 22 repo(s)") {

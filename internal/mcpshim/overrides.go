@@ -18,22 +18,62 @@ const (
 	argMaxSnippetLines = "max_snippet_lines"
 	// argSnippets (bool) turns hydration off for this call when false.
 	argSnippets = "snippets"
+	// argFormat is shared with the server, which is why it is handled differently
+	// from the two above: it is REWRITTEN rather than stripped. The three values
+	// form one ladder of increasing compaction —
+	//
+	//	verbose  server's full JSON item (default)
+	//	compact  server drops what a caller can't act on (query_shape.py)
+	//	agent    compact, and this proxy renders it as text (render.go)
+	//
+	// One knob rather than a client `format` beside a server `format`: from the
+	// caller's side "how compact do you want the answer" is a single question,
+	// and two similarly-named arguments with different value sets would be a
+	// standing invitation to pass the wrong one. `agent` is the only value the
+	// server cannot honour, so it is the only one that gets rewritten.
+	argFormat = "format"
 )
 
-// hydrationOverrides is one call's client-side hydration settings. Absent fields
-// leave the Config's value alone, so a call that passes neither argument behaves
-// exactly as before.
-type hydrationOverrides struct {
+// The values argFormat accepts. Anything else is forwarded untouched so the
+// server answers it — an unknown format is a caller mistake, and INVALID_REQUEST
+// from the tool that owns the argument beats a silent fallback here.
+const (
+	formatVerbose = "verbose"
+	formatCompact = "compact"
+	formatAgent   = "agent"
+	// formatJSON is the Config-level spelling for "do not render". It is not a
+	// wire value: on the wire, both verbose and compact mean JSON.
+	formatJSON = "json"
+)
+
+// callOverrides is one call's client-side settings. Absent fields leave the
+// Config's value alone, so a call that passes none behaves exactly as before.
+//
+// Named for the call rather than for hydration: the format is an encoding
+// choice, not a hydration one, and the two are independent (an agent-format
+// response can carry bodies; a JSON response can omit them).
+type callOverrides struct {
 	maxSnippetLines *int
 	snippets        *bool
+	format          *string
 }
 
-func (o hydrationOverrides) empty() bool {
-	return o.maxSnippetLines == nil && o.snippets == nil
+func (o callOverrides) empty() bool {
+	return o.maxSnippetLines == nil && o.snippets == nil && o.format == nil
 }
 
 // apply returns a copy of cfg with this call's overrides folded in.
-func (o hydrationOverrides) apply(cfg Config) Config {
+func (o callOverrides) apply(cfg Config) Config {
+	// An explicit per-call format beats the process default in BOTH directions:
+	// `serve --format=agent` sets the house style, and a caller that asks for
+	// verbose/compact JSON gets JSON.
+	switch {
+	case o.format == nil:
+	case *o.format == formatAgent:
+		cfg.Format = formatAgent
+	case *o.format == formatVerbose || *o.format == formatCompact:
+		cfg.Format = formatJSON
+	}
 	if o.snippets != nil && !*o.snippets {
 		cfg.NoSnippets = true
 	}
@@ -51,32 +91,33 @@ func (o hydrationOverrides) apply(cfg Config) Config {
 	return cfg
 }
 
-// takeHydrationOverrides extracts the client-only arguments from a JSON-RPC
-// tools/call body and returns the body with them removed.
+// takeCallOverrides extracts this call's overrides from a JSON-RPC tools/call
+// body and returns the body to forward: the client-only arguments removed, and
+// format=agent rewritten to the compact JSON the server can actually produce.
 //
 // Returns the ORIGINAL body untouched whenever nothing was found or anything
 // fails to parse. That matters: this runs on every message on the wire,
 // including ones this proxy knows nothing about, and a re-marshal that drops an
 // unrecognised field would break them. Only a body that actually carried an
 // override is rewritten.
-func takeHydrationOverrides(body []byte) ([]byte, hydrationOverrides) {
+func takeCallOverrides(body []byte) ([]byte, callOverrides) {
 	var msg map[string]json.RawMessage
 	if err := json.Unmarshal(body, &msg); err != nil {
-		return body, hydrationOverrides{}
+		return body, callOverrides{}
 	}
 	if method, _ := unmarshalString(msg["method"]); method != "tools/call" {
-		return body, hydrationOverrides{}
+		return body, callOverrides{}
 	}
 	var params map[string]json.RawMessage
 	if err := json.Unmarshal(msg["params"], &params); err != nil {
-		return body, hydrationOverrides{}
+		return body, callOverrides{}
 	}
 	var args map[string]json.RawMessage
 	if err := json.Unmarshal(params["arguments"], &args); err != nil {
-		return body, hydrationOverrides{}
+		return body, callOverrides{}
 	}
 
-	var out hydrationOverrides
+	var out callOverrides
 	stripped := false
 	if raw, ok := args[argMaxSnippetLines]; ok {
 		var n int
@@ -97,13 +138,31 @@ func takeHydrationOverrides(body []byte) ([]byte, hydrationOverrides) {
 		delete(args, argSnippets)
 		stripped = true
 	}
+	// QUERY-only: it is the one tool that declares `format`, and rewriting a
+	// same-named argument on another tool would corrupt that call.
+	if toolName, _ := unmarshalString(params["name"]); toolName == "QUERY" {
+		if raw, ok := args[argFormat]; ok {
+			if value, ok := unmarshalString(raw); ok {
+				out.format = &value
+				// Unlike the other two, format is a real server argument. Only the
+				// one value the server cannot produce is rewritten — and to
+				// `compact` rather than dropped, because agent rendering reads none
+				// of the fields compact omits, so a verbose copy would be paid for
+				// on the server → proxy hop and then discarded.
+				if value == formatAgent {
+					args[argFormat], _ = json.Marshal(formatCompact)
+					stripped = true
+				}
+			}
+		}
+	}
 	if !stripped {
 		return body, out
 	}
 
 	rewritten, ok := rewriteArguments(msg, params, args)
 	if !ok {
-		return body, hydrationOverrides{}
+		return body, callOverrides{}
 	}
 	return rewritten, out
 }

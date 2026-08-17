@@ -45,7 +45,7 @@ func TestTakeHydrationOverrides_StripsClientOnlyArgs(t *testing.T) {
 		"snippets":          false,
 	})
 
-	out, ov := takeHydrationOverrides(body)
+	out, ov := takeCallOverrides(body)
 
 	args := callArguments(t, out)
 	for _, k := range []string{argMaxSnippetLines, argSnippets} {
@@ -76,7 +76,7 @@ func TestTakeHydrationOverrides_PassesOtherMessagesThroughUnchanged(t *testing.T
 		[]byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`),
 		[]byte(`not json at all`),
 	} {
-		out, ov := takeHydrationOverrides(body)
+		out, ov := takeCallOverrides(body)
 		if string(out) != string(body) {
 			t.Errorf("body rewritten:\n got %s\nwant %s", out, body)
 		}
@@ -95,18 +95,18 @@ func TestHydrationOverrides_Apply(t *testing.T) {
 
 	for _, tc := range []struct {
 		name       string
-		ov         hydrationOverrides
+		ov         callOverrides
 		wantLines  int
 		wantNoSnip bool
 	}{
-		{"empty leaves config alone", hydrationOverrides{}, 80, false},
-		{"explicit budget", hydrationOverrides{maxSnippetLines: &five}, 5, false},
-		{"snippets false", hydrationOverrides{snippets: &no}, 80, true},
-		{"snippets true is a no-op", hydrationOverrides{snippets: &yes}, 80, false},
+		{"empty leaves config alone", callOverrides{}, 80, false},
+		{"explicit budget", callOverrides{maxSnippetLines: &five}, 5, false},
+		{"snippets false", callOverrides{snippets: &no}, 80, true},
+		{"snippets true is a no-op", callOverrides{snippets: &yes}, 80, false},
 		// "at most zero lines" is a request for no bodies, not for the default
 		// budget — which is what a 0 means to snippetLineBudget.
-		{"zero budget means no snippets", hydrationOverrides{maxSnippetLines: &zero}, 80, true},
-		{"negative budget means no snippets", hydrationOverrides{maxSnippetLines: &negative}, 80, true},
+		{"zero budget means no snippets", callOverrides{maxSnippetLines: &zero}, 80, true},
+		{"negative budget means no snippets", callOverrides{maxSnippetLines: &negative}, 80, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tc.ov.apply(base)
@@ -127,7 +127,7 @@ func TestHydrationOverrides_Apply(t *testing.T) {
 func TestHydrationOverrides_ChangeHydratedOutput(t *testing.T) {
 	cfg, payload := bigFileResponse(t, "app/models/big.rb", 500, 240, "app")
 
-	_, ov := takeHydrationOverrides(toolCall(t, map[string]any{
+	_, ov := takeCallOverrides(toolCall(t, map[string]any{
 		"query_text":        "x",
 		"max_snippet_lines": 12,
 	}))
@@ -139,5 +139,65 @@ func TestHydrationOverrides_ChangeHydratedOutput(t *testing.T) {
 	}
 	if got := len(strings.Split(s, "\n")); got != 12 {
 		t.Errorf("snippet has %d lines, want the per-call 12", got)
+	}
+}
+
+// `format` is the one override the server shares. It must reach the server —
+// rewritten to a value the server understands when the caller asked for the one
+// it cannot produce, and untouched otherwise.
+func TestTakeCallOverrides_Format(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		sent       any
+		wantOnWire any
+		wantFormat string
+	}{
+		// agent is rendered by the proxy, so the server is asked for the compact
+		// JSON the rendering is built from rather than the verbose default.
+		{"agent is rewritten to compact", "agent", "compact", formatAgent},
+		{"compact is forwarded", "compact", "compact", formatJSON},
+		{"verbose is forwarded", "verbose", "verbose", formatJSON},
+		// An unknown value is the server's to reject: INVALID_REQUEST from the
+		// tool that owns the argument beats a silent fallback here.
+		{"unknown is forwarded untouched", "xml", "xml", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := toolCall(t, map[string]any{"query_text": "x", "format": tc.sent})
+
+			out, ov := takeCallOverrides(body)
+
+			got, _ := unmarshalString(callArguments(t, out)[argFormat])
+			if got != tc.wantOnWire {
+				t.Errorf("forwarded format %q, want %q", got, tc.wantOnWire)
+			}
+			cfg := ov.apply(Config{})
+			if cfg.Format != tc.wantFormat {
+				t.Errorf("Config.Format = %q, want %q", cfg.Format, tc.wantFormat)
+			}
+		})
+	}
+}
+
+// The rewrite is keyed to QUERY. GRAPH has no format argument today, but if any
+// other tool grows one it must not be silently rewritten by this proxy.
+func TestTakeCallOverrides_FormatIsQueryOnly(t *testing.T) {
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{
+			"name":      "GRAPH",
+			"arguments": map[string]any{"chunk_or_symbol": "X", "format": "agent"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	out, ov := takeCallOverrides(body)
+
+	if got, _ := unmarshalString(callArguments(t, out)[argFormat]); got != "agent" {
+		t.Errorf("GRAPH's format was rewritten to %q; it belongs to that tool", got)
+	}
+	if ov.apply(Config{}).Format == formatAgent {
+		t.Error("a GRAPH argument switched the proxy into agent rendering")
 	}
 }

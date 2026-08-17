@@ -7,24 +7,53 @@ import (
 	"path/filepath"
 )
 
-// enrichQueryResponse unmasks path_tokens and hydrates snippets in QUERY responses.
+// enrichQueryResponse unmasks path_tokens and hydrates snippets in QUERY
+// responses, reporting the cost of the JSON it produced.
 func enrichQueryResponse(cfg Config, data []byte) []byte {
+	out, results, acct := enrichQueryPayload(cfg, data)
+	acct.report(cfg, results, len(out))
+	return out
+}
+
+// HydrateQueryPayload enriches a raw server QUERY envelope: real_path on every
+// result it can unmask, a snippet body read from the local checkout, and a
+// `hydration` reason wherever a body could not be produced.
+//
+// Exported for `codastre query`, which talks to the server directly and so has
+// no proxy to enrich for it. It is the same code path `serve` runs, deliberately:
+// two implementations would be two chances to disagree about which line a body
+// starts at. Returns the payload unchanged when cfg can resolve no paths at all.
+//
+// No cost line: cfg.Log bills the caller for the bytes it was sent, and what a
+// person sees in a terminal is the rendering, not this JSON.
+func HydrateQueryPayload(cfg Config, payload []byte) []byte {
+	cfg.Log = nil
+	out, _, _ := enrichQueryPayload(cfg, payload)
+	return out
+}
+
+// enrichQueryPayload is enrichQueryResponse without the cost report, for callers
+// that go on to re-encode the payload. Agent format renders the JSON to text
+// afterwards, so reporting here would bill the caller for a payload that was
+// never sent — the one number the cost line exists to keep honest.
+func enrichQueryPayload(cfg Config, data []byte) ([]byte, int, payloadAccount) {
+	var acct payloadAccount
 	if !cfg.canEnrich() {
-		return data
+		return data, 0, acct
 	}
 
 	var env map[string]json.RawMessage
 	if err := json.Unmarshal(data, &env); err != nil {
-		return data
+		return data, 0, acct
 	}
 	resultsRaw, ok := env["results"]
 	if !ok {
-		return data
+		return data, 0, acct
 	}
 
 	var results []map[string]json.RawMessage
 	if err := json.Unmarshal(resultsRaw, &results); err != nil {
-		return data
+		return data, 0, acct
 	}
 
 	// The index-free (federated) QUERY path returns mask_key_rev: null and puts
@@ -40,7 +69,6 @@ func enrichQueryResponse(cfg Config, data []byte) []byte {
 		_ = json.Unmarshal(raw, &maskKeyRevs)
 	}
 
-	var acct payloadAccount
 	for i, r := range results {
 		results[i] = enrichQueryResult(cfg, r, maskKeyRev, maskKeyRevs, &acct)
 	}
@@ -48,8 +76,7 @@ func enrichQueryResponse(cfg Config, data []byte) []byte {
 	enriched, _ := json.Marshal(results)
 	env["results"] = enriched
 	out, _ := json.Marshal(env)
-	acct.report(cfg, len(results), len(out))
-	return out
+	return out, len(results), acct
 }
 
 // enrichQueryResult adds real_path and, when possible, a snippet to one QUERY
@@ -168,5 +195,24 @@ func (a *payloadAccount) report(cfg Config, results, bytes int) {
 	if a.truncated > 0 {
 		msg += fmt.Sprintf(" · %d truncated", a.truncated)
 	}
+	// Name the tier that produced the number. Without it the cost line cannot
+	// answer the question the plan says to instrument first: whether callers
+	// ever actually reach for the cheap tiers (agent-response-format.md,
+	// "What would falsify this").
+	msg += " · " + a.mode(cfg)
 	fmt.Fprintln(cfg.Log, msg)
+}
+
+// mode names the encoding and hydration tier this response was produced under,
+// e.g. "agent/snippets:off".
+func (a *payloadAccount) mode(cfg Config) string {
+	format := cfg.Format
+	if format == "" {
+		format = formatJSON
+	}
+	snippets := "snippets:on"
+	if cfg.NoSnippets {
+		snippets = "snippets:off"
+	}
+	return format + "/" + snippets
 }

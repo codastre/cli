@@ -29,6 +29,15 @@ const (
 	maxSnippetLinesArgDescription = "Cap each snippet at this many lines for this " +
 		"call. Lower it to widen top_k without paying for full bodies; 0 is " +
 		"equivalent to snippets=false. Handled locally by the codastre CLI proxy."
+
+	// formatAgentNote extends the server's own `format` description rather than
+	// replacing it: verbose and compact are the server's values and it documents
+	// them, while `agent` is a third rung this proxy adds on top of compact.
+	formatAgentNote = " Through the codastre CLI proxy a third value is available: " +
+		"'agent' renders the response as text — hits grouped by file, one path " +
+		"per file instead of once per hit, bodies as source with real line " +
+		"numbers instead of JSON-escaped strings. Pair it with snippets=false " +
+		"for the cheapest locate call."
 )
 
 // annotateToolList injects the client-only hydration arguments into the QUERY
@@ -91,6 +100,44 @@ func annotateToolList(cfg Config, data []byte) []byte {
 	return out
 }
 
+// extendFormatEnum adds "agent" to the server's `format` property — its enum and
+// its description — and reports whether it changed anything.
+//
+// Additive on purpose. The server owns this argument's meaning and documents
+// verbose/compact itself; restating them here would be a second copy to keep in
+// step. A server that has not shipped `format` yet has no property to extend, so
+// nothing is added and no phantom argument is advertised.
+func extendFormatEnum(props map[string]json.RawMessage) bool {
+	raw, ok := props[argFormat]
+	if !ok {
+		return false
+	}
+	var prop map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &prop); err != nil {
+		return false
+	}
+	var values []string
+	if err := json.Unmarshal(prop["enum"], &values); err != nil {
+		return false
+	}
+	for _, v := range values {
+		if v == formatAgent {
+			return false // already advertised (a future server, or a re-annotation)
+		}
+	}
+	prop["enum"], _ = json.Marshal(append(values, formatAgent))
+
+	if desc, ok := unmarshalString(prop["description"]); ok {
+		prop["description"], _ = json.Marshal(desc + formatAgentNote)
+	}
+	updated, err := json.Marshal(prop)
+	if err != nil {
+		return false
+	}
+	props[argFormat] = updated
+	return true
+}
+
 // withHydrationArgs returns schemaRaw with the two hydration properties added.
 // Existing properties of the same name are left alone: if a future server starts
 // declaring them, its definition wins over this local one.
@@ -108,8 +155,13 @@ func withHydrationArgs(schemaRaw json.RawMessage) (json.RawMessage, bool) {
 			return nil, false
 		}
 	}
-
 	added := false
+
+	// `format` is the server's argument; the proxy only adds its extra value to
+	// the enum the server published, so a strict client will send it.
+	if extendFormatEnum(props) {
+		added = true
+	}
 	for name, def := range map[string]any{
 		argSnippets: map[string]any{
 			"type":        "boolean",

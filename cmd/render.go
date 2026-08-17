@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+
+	"github.com/codastre/cli/internal/mcpshim"
 )
 
 // ── QUERY envelope ──────────────────────────────────────────────────────────
@@ -47,6 +49,35 @@ type queryResult struct {
 	// title instead of the opaque doc-id path_token.
 	Title     *string `json:"title"`
 	SourceRef *string `json:"source_ref"`
+
+	// Written locally by mcpshim.HydrateQueryPayload, never by the server — it
+	// holds no source. Absent on a run that could not hydrate (--no-snippets,
+	// --no-unmask, no local checkout), in which case the renderer falls back to
+	// the ranked-locations output this command emitted before hydration existed.
+	RealPath         string `json:"real_path"`
+	Snippet          string `json:"snippet"`
+	SnippetTruncated bool   `json:"snippet_truncated"`
+	SnippetLineEnd   int    `json:"snippet_line_end"`
+	Stale            bool   `json:"stale"`
+	Hydration        string `json:"hydration"`
+}
+
+// displayPath is what the reader should open: the real path hydration resolved,
+// else a display-time unmask, else the raw token. Hydration wins because it read
+// a file at that path — an unmask that disagrees with it would be the stale one.
+func (r queryResult) displayPath(
+	unmask func(pathToken string, maskKeyRev int) (string, bool),
+	maskKeyRev int,
+) string {
+	if r.RealPath != "" {
+		return r.RealPath
+	}
+	if unmask != nil {
+		if real, ok := unmask(r.PathToken, maskKeyRev); ok {
+			return real
+		}
+	}
+	return r.PathToken
 }
 
 // repoLabel resolves a repo_id to its remote_url for display, falling back to
@@ -58,20 +89,36 @@ func (e queryEnvelope) repoLabel(repoID string) string {
 	return repoID
 }
 
+// humanSnippetIndent lines the body's gutter up under the hit's detail line,
+// which is itself indented four spaces from the numbered rank.
+const humanSnippetIndent = "      "
+
 // renderQueryHuman writes a human-readable QUERY result to w. When unmask is
 // non-nil it converts each result's HMAC path_token back to the real path for
 // display; an unmask miss (or nil unmask) falls back to showing the raw token.
+//
+// Hydrated results (mcpshim.HydrateQueryPayload, applied by runQuery before it
+// gets here) carry their body, which is printed under the hit with real file
+// line numbers. noSnippets says hydration was switched off for this run, so the
+// header can explain the missing bodies once instead of once per hit.
 func renderQueryHuman(
 	w io.Writer,
 	payload json.RawMessage,
 	unmask func(pathToken string, maskKeyRev int) (string, bool),
+	noSnippets bool,
 ) error {
 	var env queryEnvelope
 	if err := json.Unmarshal(payload, &env); err != nil {
 		return fmt.Errorf("decode QUERY response: %w", err)
 	}
 
-	fmt.Fprintf(w, "freshness: %s · searched %d repo(s)\n", env.Freshness, env.searchedCount())
+	fmt.Fprintf(w, "freshness: %s · searched %d repo(s)", env.Freshness, env.searchedCount())
+	if noSnippets {
+		// Names the flag, because this is the default state: hydration is
+		// otherwise invisible, and a feature nobody can find is not a feature.
+		fmt.Fprint(w, " · locations only (--snippets for bodies)")
+	}
+	fmt.Fprintln(w)
 	if env.SyncJobID != nil && *env.SyncJobID != "" {
 		fmt.Fprintf(w, "sync in progress: job %s\n", *env.SyncJobID)
 	}
@@ -82,13 +129,15 @@ func renderQueryHuman(
 		return nil
 	}
 
+	// Bodies turn a two-line entry into a screenful, and consecutive screenfuls
+	// run together without a break. Only inserted after an entry that actually
+	// printed one, so a locations-only listing keeps its compact shape.
+	spaced := false
 	for i, r := range env.Results {
-		path := r.PathToken
-		if unmask != nil {
-			if real, ok := unmask(r.PathToken, env.MaskKeyRev); ok {
-				path = real
-			}
+		if spaced {
+			fmt.Fprintln(w)
 		}
+		path := r.displayPath(unmask, env.MaskKeyRev)
 		fmt.Fprintf(w, "%2d. [%.3f] %s\n", i+1, r.Score, env.repoLabel(r.RepoID))
 
 		// Document hit: lead with the title (the opaque path_token is the doc-id,
@@ -100,17 +149,66 @@ func renderQueryHuman(
 			}
 			fmt.Fprintf(w, "    %s  (%s)\n", label, r.ContentKind)
 			fmt.Fprintf(w, "    doc %s\n", path)
-			continue
+		} else {
+			// Code hit: path:lines and the symbol name.
+			sym := ""
+			if r.SymbolName != nil && *r.SymbolName != "" {
+				sym = "  " + *r.SymbolName
+			}
+			fmt.Fprintf(w, "    %s:%d-%d%s  (%s)%s\n",
+				path, r.LineStart, r.LineEnd, sym, r.ContentKind, staleNote(r))
 		}
-
-		// Code hit: path:lines and the symbol name.
-		sym := ""
-		if r.SymbolName != nil && *r.SymbolName != "" {
-			sym = "  " + *r.SymbolName
-		}
-		fmt.Fprintf(w, "    %s:%d-%d%s  (%s)\n", path, r.LineStart, r.LineEnd, sym, r.ContentKind)
+		spaced = writeHumanSnippet(w, r, noSnippets)
 	}
 	return nil
+}
+
+// restOfBody names the lines a truncated body left behind. A budget that stops
+// one line short of the span is common enough that "lines 840-840" would be a
+// regular sight, and it reads as a mistake — so the singular case carries its
+// own verb rather than being patched onto a plural sentence.
+func restOfBody(from, to int) string {
+	if from >= to {
+		return fmt.Sprintf("line %d has the rest", from)
+	}
+	return fmt.Sprintf("lines %d-%d have the rest", from, to)
+}
+
+// staleNote marks a body read from a file that has changed since it was indexed:
+// the span is a lead, not a quote, and a reader who copies it as gospel is
+// quoting a version that no longer exists.
+func staleNote(r queryResult) string {
+	if !r.Stale {
+		return ""
+	}
+	return "  [stale — local file differs from the indexed blob]"
+}
+
+// writeHumanSnippet prints a hit's hydrated body, or the reason there is none,
+// and reports whether it printed a body. The reason matters: an absent body is
+// otherwise indistinguishable from "that repo isn't checked out here", "the file
+// moved" and "the read failed", which have three different fixes.
+func writeHumanSnippet(w io.Writer, r queryResult, noSnippets bool) bool {
+	if r.Snippet != "" {
+		last := mcpshim.WriteSnippetLines(w, humanSnippetIndent, r.Snippet, r.LineStart)
+		if r.SnippetTruncated {
+			if r.SnippetLineEnd != 0 {
+				last = r.SnippetLineEnd
+			}
+			// Where the rest is, not merely that something is missing. The path
+			// is two lines up, so the range alone is enough here — unlike the
+			// agent rendering, which hands over a whole Read argument.
+			fmt.Fprintf(w, "%s⋯ truncated · %s\n",
+				humanSnippetIndent, restOfBody(last+1, r.LineEnd))
+		}
+		return true
+	}
+	// Every reason except the one the header already gave — repeating "snippets
+	// off" under each hit restates the mode instead of saying anything.
+	if r.Hydration != "" && !(noSnippets && r.Hydration == mcpshim.HydrationSnippetsDisabled) {
+		fmt.Fprintf(w, "%sno body: %s\n", humanSnippetIndent, r.Hydration)
+	}
+	return false
 }
 
 // ── GRAPH envelope ──────────────────────────────────────────────────────────

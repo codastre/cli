@@ -22,6 +22,7 @@ var serveNoWatch bool
 var serveServerURL string
 var serveMaxSnippetLines int
 var serveNoSnippets bool
+var serveFormat string
 var serveQuiet bool
 
 func init() {
@@ -32,6 +33,9 @@ func init() {
 			"(0 = built-in default) [$CODASTRE_MAX_SNIPPET_LINES]")
 	serveCmd.Flags().BoolVar(&serveNoSnippets, "no-snippets", defaultNoSnippets(),
 		"Return ranked locations only, without hydrating snippet bodies [$CODASTRE_NO_SNIPPETS]")
+	serveCmd.Flags().StringVar(&serveFormat, "format", defaultQueryFormat(),
+		"How QUERY results are encoded when the caller does not ask: "+
+			"json | agent (text rendering) [$CODASTRE_QUERY_FORMAT]")
 	serveCmd.Flags().BoolVar(&serveQuiet, "quiet", false, "Suppress the per-QUERY cost line on stderr")
 	rootCmd.AddCommand(serveCmd)
 }
@@ -89,6 +93,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		CWDRepoID:       hy.CWDRepoID,
 		MaxSnippetLines: serveMaxSnippetLines,
 		NoSnippets:      serveNoSnippets,
+		Format:          serveFormat,
 		Log:             costLog,
 	}
 	return mcpshim.Run(cfg, os.Stdin, os.Stdout)

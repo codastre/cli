@@ -53,6 +53,10 @@ type Config struct {
 	// NoSnippets skips hydration entirely, returning ranked locations only. For
 	// cheap orientation queries where the paths are the answer.
 	NoSnippets bool
+	// Format is how a QUERY result is encoded: "json" (default, the server's
+	// envelope enriched in place) or "agent" (a text rendering — see render.go).
+	// Empty is "json".
+	Format string
 	// Log, when non-nil, receives one human-readable cost line per QUERY
 	// response. Must NOT be stdout: that carries the JSON-RPC stream.
 	Log io.Writer
@@ -88,6 +92,12 @@ const (
 	// needs rather than trying to repair anything.
 	hydrationSnippetsDisabled = "snippets_disabled"
 )
+
+// HydrationSnippetsDisabled is hydrationSnippetsDisabled for callers outside this
+// package. `codastre query`'s renderer needs it for the same reason the agent
+// rendering does: it is the one reason the header already stated, so repeating it
+// per hit restates the mode instead of saying anything.
+const HydrationSnippetsDisabled = hydrationSnippetsDisabled
 
 // canEnrich reports whether the proxy has any way to produce real paths /
 // snippets: an unmasker (hmac repos) or scheme knowledge (cleartext repos).
@@ -154,7 +164,7 @@ func Run(cfg Config, in io.Reader, out io.Writer) error {
 		// Client-only hydration arguments are consumed here and stripped from
 		// the request: they have no server-side counterpart and would fail the
 		// QUERY tool's schema validation. See overrides.go.
-		line, ov := takeHydrationOverrides(line)
+		line, ov := takeCallOverrides(line)
 		resp, err := forwardMessage(cfg, line)
 		if err != nil {
 			resp = errorEnvelope(line, err)
@@ -237,12 +247,25 @@ func enrichResponse(cfg Config, data []byte) []byte {
 	if err := json.Unmarshal(resultRaw, &result); err != nil {
 		return data
 	}
-	enriched, ok := enrichToolPayload(cfg, result)
+	enriched, rendering, ok := enrichToolPayload(cfg, result)
 	if !ok {
 		return data
 	}
-	result["structuredContent"] = enriched
-	setContentText(result, enriched)
+	if rendering != "" {
+		// Agent format: both representations carry the rendering. QUERY declares
+		// an outputSchema, so a spec-strict client is entitled to
+		// structuredContent — but it is an open object, and filling it with the
+		// same text the content block holds keeps the result conformant without
+		// shipping a second, unread copy of the JSON. See render.go.
+		result["structuredContent"], _ = json.Marshal(map[string]string{
+			"format":    formatAgent,
+			"rendering": rendering,
+		})
+		setContentText(result, []byte(rendering))
+	} else {
+		result["structuredContent"] = enriched
+		setContentText(result, enriched)
+	}
 	resultB, err := json.Marshal(result)
 	if err != nil {
 		return data
@@ -257,24 +280,39 @@ func enrichResponse(cfg Config, data []byte) []byte {
 
 // enrichToolPayload enriches the QUERY/GRAPH payload inside a tool result,
 // preferring result.structuredContent and falling back to the JSON string in
-// the first text content block. Returns (enriched, true) when a known payload
-// was found and processed.
-func enrichToolPayload(cfg Config, result map[string]json.RawMessage) ([]byte, bool) {
+// the first text content block. Returns (enriched, rendering, true) when a known
+// payload was found and processed; rendering is non-empty only for a QUERY
+// payload in agent format, and is then what both representations should carry.
+func enrichToolPayload(cfg Config, result map[string]json.RawMessage) ([]byte, string, bool) {
 	payload, ok := toolPayloadBytes(result)
 	if !ok {
-		return nil, false
+		return nil, "", false
 	}
 	var env map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &env); err != nil {
-		return nil, false
+		return nil, "", false
 	}
 	if _, ok := env["results"]; ok {
-		return enrichQueryResponse(cfg, payload), true
+		enriched, results, acct := enrichQueryPayload(cfg, payload)
+		if cfg.Format == formatAgent {
+			// A rendering that failed to build falls back to the JSON: half an
+			// answer in the caller's preferred shape is worse than the whole
+			// answer in the other one.
+			if text, ok := renderQueryText(enriched, RenderOptions{NoSnippets: cfg.NoSnippets}); ok {
+				acct.report(cfg, results, len(text))
+				return enriched, text, true
+			}
+		}
+		acct.report(cfg, results, len(enriched))
+		return enriched, "", true
 	}
 	if _, ok := env["edges"]; ok {
-		return enrichGraphResponse(cfg, payload), true
+		// GRAPH is not rendered: it returns edges, never bodies, so it has none
+		// of the JSON-escaping cost that motivates the text shape. Rendering it
+		// is worth measuring separately (plan open question 4).
+		return enrichGraphResponse(cfg, payload), "", true
 	}
-	return nil, false
+	return nil, "", false
 }
 
 // toolPayloadBytes returns the inner tool payload JSON: structuredContent when
