@@ -223,10 +223,17 @@ func hydrateSnippet(absPath string, lineStart, lineEnd, maxLines int, blobSHA st
 		LastLine:  lastKept,
 	}
 
-	// Staleness check: compare current blob hash to expected.
+	// Staleness check: compare the current blob hash to the expected one, by
+	// prefix rather than equality. The expected value is allowed to be
+	// abbreviated — the agent rendering prints 12 chars rather than 40, and
+	// git's own --short forms are prefixes — and an abbreviated sha compared
+	// for equality would report every hydrated file stale, which is worse than
+	// not checking at all. A 12-hex prefix is 48 bits: within one repo's blob
+	// set a collision is negligible, and its only cost is a missed staleness
+	// warning, never a wrong body.
 	if blobSHA != "" {
 		current, err := currentBlobSHA(absPath)
-		if err == nil && current != blobSHA {
+		if err == nil && !strings.HasPrefix(current, blobSHA) {
 			out.Stale = true
 		}
 	}

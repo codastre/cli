@@ -214,3 +214,33 @@ func TestRenderQueryText_CleartextTokenIsNotMarked(t *testing.T) {
 		t.Errorf("path missing\n%s", out)
 	}
 }
+
+// The blob anchor is printed abbreviated. On the deployed index the full 40-hex
+// form was 20% of a locate-tier response — the largest reducible line in it —
+// and both of its consumers compare by prefix.
+func TestRenderQueryText_AbbreviatesBlobSHA(t *testing.T) {
+	const full = "788306271f689ff37b61f2995c3b46e9e2f4b238"
+	payload := `{"status":"ok","freshness":"fresh","repos":{"r":{"remote_url":"github.com/acme/ios"}},
+	  "results":[{"repo_id":"r","path_token":"App/Recall.swift","real_path":"App/Recall.swift",
+	  "line_start":2,"line_end":34,"score":0.5833333,"content_kind":"code",
+	  "symbol_name":"RecallServiceImpl","blob_sha":"` + full + `"}]}`
+
+	out := render(t, payload, RenderOptions{NoSnippets: true})
+
+	if !strings.Contains(out, "@"+full[:blobSHAAbbrev]) {
+		t.Errorf("abbreviated blob sha missing\n%s", out)
+	}
+	if strings.Contains(out, full) {
+		t.Errorf("full 40-hex blob sha still printed\n%s", out)
+	}
+}
+
+// A sha already shorter than the abbreviation is passed through, not padded or
+// dropped: fixtures and re-rendered output must survive a round trip.
+func TestAbbrevBlobSHA_PassesShortValuesThrough(t *testing.T) {
+	for _, s := range []string{"", "aaaa1111", strings.Repeat("b", blobSHAAbbrev)} {
+		if got := abbrevBlobSHA(s); got != s {
+			t.Errorf("abbrevBlobSHA(%q) = %q, want unchanged", s, got)
+		}
+	}
+}

@@ -302,3 +302,23 @@ func TestResolveFormat(t *testing.T) {
 		}
 	}
 }
+
+// The CLI talks to the server directly, so it must forward the server-side rung
+// of the compaction ladder itself — and only for the one format whose renderer
+// reads nothing compact drops.
+func TestWireFormatFor(t *testing.T) {
+	for _, tc := range []struct {
+		format string
+		want   string
+		send   bool
+	}{
+		{formatAgent, "compact", true},
+		{formatJSON, "", false},  // documented raw passthrough of the envelope
+		{formatHuman, "", false}, // prints content_kind unconditionally
+	} {
+		got, ok := wireFormatFor(tc.format)
+		if ok != tc.send || got != tc.want {
+			t.Errorf("wireFormatFor(%q) = (%q, %v), want (%q, %v)", tc.format, got, ok, tc.want, tc.send)
+		}
+	}
+}

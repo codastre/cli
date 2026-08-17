@@ -36,12 +36,18 @@ const (
 	argFormat = "format"
 )
 
+// WireFormatCompact is the server-side rung of the compaction ladder: the most
+// compact shape the server itself can produce. Exported because `codastre query`
+// talks to the server directly rather than through this proxy, and asks for the
+// same rung when it is going to render the result as agent text.
+const WireFormatCompact = "compact"
+
 // The values argFormat accepts. Anything else is forwarded untouched so the
 // server answers it — an unknown format is a caller mistake, and INVALID_REQUEST
 // from the tool that owns the argument beats a silent fallback here.
 const (
 	formatVerbose = "verbose"
-	formatCompact = "compact"
+	formatCompact = WireFormatCompact
 	formatAgent   = "agent"
 	// formatJSON is the Config-level spelling for "do not render". It is not a
 	// wire value: on the wire, both verbose and compact mean JSON.

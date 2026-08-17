@@ -298,3 +298,40 @@ func TestIsDerivedArtifact(t *testing.T) {
 		}
 	}
 }
+
+// The staleness check compares by prefix, so the abbreviated blob_sha the agent
+// rendering prints stays a usable anchor. Equality here would report every
+// hydrated file stale — worse than not checking at all, since a stale marker on
+// a current file trains the reader to ignore it.
+func TestHydration_AbbreviatedBlobShaIsNotStale(t *testing.T) {
+	root := t.TempDir()
+	abs := filepath.Join(root, "app.py")
+	if err := os.WriteFile(abs, []byte("x = 1\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	full, err := currentBlobSHA(abs)
+	if err != nil {
+		t.Skipf("git hash-object unavailable: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		sha   string
+		stale bool
+	}{
+		{"full sha", full, false},
+		{"abbreviated to the rendering's width", full[:blobSHAAbbrev], false},
+		{"a prefix of the wrong blob", strings.Repeat("0", blobSHAAbbrev), true},
+		{"a full sha of the wrong blob", strings.Repeat("0", 40), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := hydrateSnippet(abs, 1, 1, defaultMaxSnippetLines, tc.sha)
+			if err != nil {
+				t.Fatalf("hydrateSnippet: %v", err)
+			}
+			if res.Stale != tc.stale {
+				t.Errorf("Stale = %v, want %v (blob_sha %q vs %q)", res.Stale, tc.stale, tc.sha, full)
+			}
+		})
+	}
+}

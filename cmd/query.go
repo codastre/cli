@@ -161,6 +161,9 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	if len(queryErrorCodes) > 0 {
 		toolArgs["error_codes"] = queryErrorCodes
 	}
+	if wire, ok := wireFormatFor(format); ok {
+		toolArgs["format"] = wire
+	}
 
 	// Server caps QUERY at 10s; allow margin for transport.
 	ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
@@ -293,6 +296,35 @@ const (
 	formatJSON  = "json"
 	formatAgent = "agent"
 )
+
+// wireFormatFor maps an output format to the shape to ask the server for, and
+// reports whether to send one at all.
+//
+// This is the server-side rung of the compaction ladder the MCP proxy already
+// forwards (mcpshim/overrides.go). This command talks to the server directly,
+// so nothing forwards it on our behalf: without this the most compact output
+// the CLI can print is still rendered from the most verbose envelope the server
+// can send.
+//
+// Only `agent` opts in, and the reason is per-format, not caution:
+//
+//   - `json` is documented as a raw passthrough of the server envelope. A
+//     caller parsing it chose the unabridged shape.
+//   - `human` prints content_kind unconditionally (render.go), and compact
+//     omits it at its default value — the output would read "()".
+//   - `agent` reads nothing compact drops. Its `seed:` tag fires only where
+//     symbol_name is absent, which is exactly where the server keeps chunk_id,
+//     and it prints content_kind/path_class only at non-default values. The
+//     two conditions are mirror images by construction.
+//
+// A server predating the parameter ignores it rather than rejecting it
+// (verified against production), so no version negotiation is needed.
+func wireFormatFor(format string) (string, bool) {
+	if format == formatAgent {
+		return mcpshim.WireFormatCompact, true
+	}
+	return "", false
+}
 
 // resolveFormat resolves the --json / --format flags into one format, for every
 // command that renders. It is tri-state because a bool cannot express three: the

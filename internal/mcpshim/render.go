@@ -270,14 +270,32 @@ func writeHeader(b *strings.Builder, env renderEnvelope, noSnippets bool) {
 func writeFileHeader(b *strings.Builder, g fileGroup) {
 	b.WriteString("  ")
 	b.WriteString(g.path)
-	// Full sha, not a prefix: it is the anchor an agent compares against
-	// `git hash-object` (and codastre-fetch-source verifies), and those are
-	// equality checks. Once per file rather than once per hit is the saving.
 	if g.blobSHA != "" {
 		b.WriteString(" @")
-		b.WriteString(g.blobSHA)
+		b.WriteString(abbrevBlobSHA(g.blobSHA))
 	}
 	b.WriteByte('\n')
+}
+
+// blobSHAAbbrev is how many hex chars of a blob sha the rendering prints.
+//
+// Measured on the deployed ios-app index, the full 40-hex anchor was 20% of a
+// locate-tier response (5 hits: 205 B of 1,013; 20 hits: 779 B of 4,273) — the
+// largest reducible line in it, and the only field printed at five times the
+// width its consumer needs. 12 is what git itself abbreviates to at this repo
+// size, and both consumers compare by prefix: hydrateSnippet (snippet.go) and
+// the `git rev-parse --short=12` step in the codastre-fetch-source skill. The
+// worst case a collision buys is a missed staleness warning.
+const blobSHAAbbrev = 12
+
+// abbrevBlobSHA shortens a blob sha for display. Shorter values are passed
+// through untouched — the server is the only producer, but a fixture or an
+// already-abbreviated sha must not be padded or rejected.
+func abbrevBlobSHA(sha string) string {
+	if len(sha) <= blobSHAAbbrev {
+		return sha
+	}
+	return sha[:blobSHAAbbrev]
 }
 
 func writeHit(b *strings.Builder, r renderResult, noSnippets bool) {
