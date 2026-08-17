@@ -335,3 +335,36 @@ func TestHydration_AbbreviatedBlobShaIsNotStale(t *testing.T) {
 		})
 	}
 }
+
+// The cost line's token figure exists to compare tiers, so its divisor must
+// follow the payload shape. bytes/4 — the prose default it used to carry —
+// understated every payload this tool emits, and understated JSON worst, which
+// flattered exactly the format the compaction ladder exists to move callers off.
+func TestPayloadCost_TokenDivisorFollowsFormat(t *testing.T) {
+	for _, tc := range []struct{ format, want string }{
+		{formatAgent, "~0.3k tokens"}, // 1000 B / 3.0
+		{formatJSON, "~0.4k tokens"},  // 1000 B / 2.5
+		{"", "~0.4k tokens"},          // unset defaults to JSON, the default format
+	} {
+		var log bytes.Buffer
+		acct := payloadAccount{}
+		acct.report(Config{Log: &log, Format: tc.format}, 1, 1000)
+		if !strings.Contains(log.String(), tc.want) {
+			t.Errorf("format %q: cost line %q, want %q", tc.format, strings.TrimSpace(log.String()), tc.want)
+		}
+	}
+}
+
+// The measured ratios the constants come from, pinned so a future edit has to
+// argue with the measurement rather than drift back to a round number.
+func TestPayloadCost_DivisorsMatchMeasuredRange(t *testing.T) {
+	if bytesPerTokenJSON < 2.38 || bytesPerTokenJSON > 2.69 {
+		t.Errorf("JSON divisor %.2f outside the measured 2.38–2.69", bytesPerTokenJSON)
+	}
+	if bytesPerTokenAgent < 2.48 || bytesPerTokenAgent > 3.48 {
+		t.Errorf("agent divisor %.2f outside the measured 2.48–3.48", bytesPerTokenAgent)
+	}
+	if bytesPerTokenAgent <= bytesPerTokenJSON {
+		t.Error("the rendering tokenises more efficiently than JSON; its divisor must be larger")
+	}
+}

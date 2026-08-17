@@ -179,18 +179,51 @@ func (a *payloadAccount) add(res snippetResult) {
 	}
 }
 
+// Bytes per token, by payload shape. The prose default of 4 is wrong for
+// everything this tool emits, and wrong unevenly, which matters because the cost
+// line exists to compare tiers against each other.
+//
+// Measured with cl100k_base over eight deployed responses — two repos plus a
+// federated run, top_k 5 to 20, bodies on and off
+// (docs/plans/agent-response-format-implementation.md §8.4):
+//
+//	JSON envelopes   2.38 – 2.69   (pooled 2.53)
+//	agent rendering  2.48 – 3.48   (pooled 3.33)
+//
+// A JSON envelope is dense in the tokeniser's worst input — 64-hex ids, quoted
+// keys, escaped newlines — while the rendering keeps mostly paths and
+// identifiers, which pack well. Hence two constants rather than one: a single
+// divisor would understate JSON and overstate the rendering, biasing exactly the
+// comparison the line is for.
+//
+// These are estimates and the "~" in the output is meant: within a shape the
+// spread is corpus-dependent (repeated long path prefixes merge well and push
+// the ratio up), so treat any single figure as ±20%. Not Claude's tokeniser
+// either — same family, so the ordering holds and the magnitudes may shift.
+const (
+	bytesPerTokenJSON  = 2.5
+	bytesPerTokenAgent = 3.0
+)
+
+func bytesPerToken(cfg Config) float64 {
+	if cfg.Format == formatAgent {
+		return bytesPerTokenAgent
+	}
+	return bytesPerTokenJSON
+}
+
 // report writes a one-line cost summary to cfg.Log (C6). Payload cost is
 // invisible at the point of use, which is why measuring it took a dedicated
 // experiment; a line per response makes an expensive query legible immediately.
-// Bytes are the enriched envelope's real size; the token figure is the usual
-// ~4-bytes-per-token approximation and is labelled as such.
+// Bytes are the enriched envelope's real size; the token figure is derived from
+// it via the measured ratio above and is labelled approximate.
 func (a *payloadAccount) report(cfg Config, results, bytes int) {
 	if cfg.Log == nil {
 		return
 	}
 	msg := fmt.Sprintf(
 		"query: %d results · %d hydrated · %d lines · %d bytes (~%.1fk tokens)",
-		results, a.hydrated, a.lines, bytes, float64(bytes)/4000.0,
+		results, a.hydrated, a.lines, bytes, float64(bytes)/(bytesPerToken(cfg)*1000.0),
 	)
 	if a.truncated > 0 {
 		msg += fmt.Sprintf(" · %d truncated", a.truncated)
