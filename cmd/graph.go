@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/codastre/cli/internal/mcpclient"
+	"github.com/codastre/cli/internal/mcpshim"
 	"github.com/spf13/cobra"
 )
 
@@ -53,6 +54,10 @@ Reading confidence:
     0.5-0.9 plausible, <0.5 weak).
 Human output flags hypotheses with [hypothesis]; use --json for raw edges.
 
+Output format: --format human (default), json, or agent. 'agent' is the compact
+text the MCP proxy emits — edges grouped under their source file, so a fan-out
+writes that path once instead of once per edge.
+
 Paths: src/dst are path_tokens (cleartext unless the repo uses HMAC masking).
 For an HMAC-masked repo, human output unmasks them to real paths by hashing a
 local checkout's files with the masking key. When run outside the traversed
@@ -65,6 +70,7 @@ Examples:
   codastre graph processPayment                         # this repo, outbound, depth 1
   codastre graph processPayment --direction inbound     # who calls it
   codastre graph OrderCreated --kind kafka --all        # cross-repo producers/consumers
+  codastre graph processPayment --format agent          # compact text for agents
   codastre graph --topic orders --all                   # who produces/consumes topic "orders"
   codastre graph chargeCard --kind calls --depth 2 --json`,
 	Args:         cobra.MaximumNArgs(1),
@@ -100,14 +106,15 @@ func init() {
 	f.IntVar(&graphDepth, "depth", 1, "Traversal depth (1-3)")
 	f.StringVar(&graphDirection, "direction", "outbound", "Traversal direction: outbound | inbound | both")
 	f.BoolVar(&graphJSON, "json", false, "Emit the raw JSON envelope instead of human output")
-	f.StringVar(&graphFormat, "format", "human", "Output format: human | json")
+	f.StringVar(&graphFormat, "format", "human",
+		"Output format: human | json | agent (compact text for agents)")
 	f.BoolVar(&graphNoUnmask, "no-unmask", false, "Show raw masked path_tokens; skip unmasking to real paths")
 	f.StringVar(&graphRepoPath, "repo-path", "", "Local checkout of the traversed repo to unmask against (when run outside it)")
 	rootCmd.AddCommand(graphCmd)
 }
 
 func runGraph(cmd *cobra.Command, args []string) error {
-	asJSON, err := wantJSON(graphJSON, graphFormat)
+	format, err := resolveFormat(graphJSON, graphFormat)
 	if err != nil {
 		return err
 	}
@@ -161,13 +168,30 @@ func runGraph(cmd *cobra.Command, args []string) error {
 		return graphErrorHint(err)
 	}
 
-	if asJSON {
+	if format == formatJSON {
 		return printJSON(cmd.OutOrStdout(), payload)
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "target: %s\n", tgt.describe())
 	var unmask func(pathToken string, maskKeyRev int) (string, bool)
 	if !graphNoUnmask {
 		unmask = resolveUnmask(cmd.ErrOrStderr(), tgt, graphRepoPath, graphServerURL, apiKey)
+	}
+	if format == formatAgent {
+		// The same rendering the MCP proxy emits, so a person reading the CLI and
+		// an agent reading the tool see one shape, not two. RepoLabel does here
+		// what the proxy's remote_url backfill does there: GRAPH's repos map
+		// carries only masking metadata, so without it every traversal is headed
+		// by a bare UUID.
+		cwdRoot, _ := findGitRoot(".")
+		text, ok := mcpshim.RenderGraphText(payload, mcpshim.RenderOptions{
+			Unmask:    unmask,
+			RepoLabel: federatedHydration(graphServerURL, apiKey, cwdRoot).RemoteURL,
+		})
+		if !ok {
+			return fmt.Errorf("decode GRAPH response for --format agent")
+		}
+		_, err := fmt.Fprint(cmd.OutOrStdout(), text)
+		return err
 	}
 	return renderGraphHuman(cmd.OutOrStdout(), payload, unmask)
 }

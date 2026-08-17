@@ -89,7 +89,8 @@ func TestAnnotateToolList_AdvertisesHydrationArgs(t *testing.T) {
 }
 
 // Advertising a dial that cannot move anything is worse than not advertising it:
-// the overrides can only turn hydration off, never back on.
+// the overrides can only turn hydration off, never back on. (The format rung is
+// separate — see TestAnnotateToolList_FormatSurvivesNoSnippets.)
 func TestAnnotateToolList_SilentWhenHydrationUnavailable(t *testing.T) {
 	scheme := func(string) (string, bool) { return "none", true }
 	for name, cfg := range map[string]Config{
@@ -129,11 +130,11 @@ func TestAnnotateToolList_LeavesOtherMessagesUntouched(t *testing.T) {
 // If a future server version declares these arguments itself, its definition is
 // the authoritative one — the proxy must not clobber it.
 func TestAnnotateToolList_KeepsServerDefinition(t *testing.T) {
-	schema, ok := withHydrationArgs(json.RawMessage(
+	schema, ok := withQueryArgs(json.RawMessage(
 		`{"type":"object","properties":{"snippets":{"type":"string","description":"server owned"}}}`,
-	))
+	), true)
 	if !ok {
-		t.Fatal("withHydrationArgs returned not-ok on a schema missing max_snippet_lines")
+		t.Fatal("withQueryArgs returned not-ok on a schema missing max_snippet_lines")
 	}
 	var got map[string]json.RawMessage
 	if err := json.Unmarshal(schema, &got); err != nil {
@@ -236,4 +237,57 @@ func withFormatProperty(t *testing.T, data []byte, propJSON string) []byte {
 	env["result"], _ = json.Marshal(result)
 	out, _ := json.Marshal(env)
 	return out
+}
+
+// GRAPH renders too, so it gets the `agent` rung — described in its own terms,
+// since there are no snippets to pair it with.
+func TestAnnotateToolList_ExtendsGraphFormatEnum(t *testing.T) {
+	cfg := Config{RepoScheme: func(string) (string, bool) { return "none", true }}
+	in := withFormatProperty(t, toolListResponse(t, "GRAPH"),
+		`{"type":"string","enum":["verbose","compact"],"description":"Edge-item shape."}`)
+
+	props := toolSchemaProps(t, annotateToolList(cfg, in), "GRAPH")
+
+	var format struct {
+		Enum        []string `json:"enum"`
+		Description string   `json:"description"`
+	}
+	if err := json.Unmarshal(props[argFormat], &format); err != nil {
+		t.Fatalf("unmarshal format property: %v", err)
+	}
+	if got := strings.Join(format.Enum, ","); got != "verbose,compact,agent" {
+		t.Errorf("enum = %q, want the server's values plus agent", got)
+	}
+	if !strings.HasPrefix(format.Description, "Edge-item shape.") {
+		t.Errorf("server description was replaced: %q", format.Description)
+	}
+	if !strings.Contains(format.Description, "source file") {
+		t.Errorf("GRAPH's note reads like QUERY's: %q", format.Description)
+	}
+	// Still no hydration dials on a tool that returns no bodies.
+	for _, name := range []string{argSnippets, argMaxSnippetLines} {
+		if _, ok := props[name]; ok {
+			t.Errorf("%q advertised on GRAPH", name)
+		}
+	}
+}
+
+// A rendering costs no hydration, so `serve --no-snippets` must not hide the
+// format rung — that operator flag is about bodies, not encodings.
+func TestAnnotateToolList_FormatSurvivesNoSnippets(t *testing.T) {
+	cfg := Config{
+		RepoScheme: func(string) (string, bool) { return "none", true },
+		NoSnippets: true,
+	}
+	in := withFormatProperty(t, toolListResponse(t, "QUERY"),
+		`{"type":"string","enum":["verbose","compact"],"description":"Result-item shape."}`)
+
+	props := toolSchemaProps(t, annotateToolList(cfg, in), "QUERY")
+
+	if !strings.Contains(string(props[argFormat]), formatAgent) {
+		t.Errorf("format enum not extended under --no-snippets: %s", props[argFormat])
+	}
+	if _, ok := props[argSnippets]; ok {
+		t.Error("hydration dial advertised under --no-snippets")
+	}
 }

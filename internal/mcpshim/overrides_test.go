@@ -178,26 +178,45 @@ func TestTakeCallOverrides_Format(t *testing.T) {
 	}
 }
 
-// The rewrite is keyed to QUERY. GRAPH has no format argument today, but if any
-// other tool grows one it must not be silently rewritten by this proxy.
-func TestTakeCallOverrides_FormatIsQueryOnly(t *testing.T) {
-	body, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-		"params": map[string]any{
-			"name":      "GRAPH",
-			"arguments": map[string]any{"chunk_or_symbol": "X", "format": "agent"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+// GRAPH renders too, so it gets the same rewrite QUERY does: `agent` is the one
+// value the server cannot produce, and compact is what its rendering reads.
+func TestTakeCallOverrides_FormatOnGraph(t *testing.T) {
+	body := namedToolCall(t, "GRAPH", map[string]any{"chunk_or_symbol": "X", "format": "agent"})
+
+	out, ov := takeCallOverrides(body)
+
+	if got, _ := unmarshalString(callArguments(t, out)[argFormat]); got != formatCompact {
+		t.Errorf("forwarded format %q, want %q", got, formatCompact)
 	}
+	if ov.apply(Config{}).Format != formatAgent {
+		t.Error("GRAPH's format=agent did not switch the proxy into agent rendering")
+	}
+}
+
+// The rewrite is keyed to the two tools that declare `format`. Any other tool
+// growing a same-named argument must not be silently rewritten by this proxy.
+func TestTakeCallOverrides_FormatIsRenderedToolsOnly(t *testing.T) {
+	body := namedToolCall(t, "SYNC", map[string]any{"index_id": "X", "format": "agent"})
 
 	out, ov := takeCallOverrides(body)
 
 	if got, _ := unmarshalString(callArguments(t, out)[argFormat]); got != "agent" {
-		t.Errorf("GRAPH's format was rewritten to %q; it belongs to that tool", got)
+		t.Errorf("SYNC's format was rewritten to %q; it belongs to that tool", got)
 	}
 	if ov.apply(Config{}).Format == formatAgent {
-		t.Error("a GRAPH argument switched the proxy into agent rendering")
+		t.Error("a SYNC argument switched the proxy into agent rendering")
 	}
+}
+
+// namedToolCall builds a tools/call body for an arbitrary tool name.
+func namedToolCall(t *testing.T, name string, args map[string]any) []byte {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": name, "arguments": args},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return body
 }

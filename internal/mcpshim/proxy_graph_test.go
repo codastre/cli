@@ -2,6 +2,7 @@ package mcpshim
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -272,5 +273,93 @@ func TestEnrichGraphResponse_DoesNotOverwriteServerRemoteURL(t *testing.T) {
 	}
 	if got := env.Repos["r1"]["remote_url"]; got != "github.com/my-org/authoritative" {
 		t.Errorf("remote_url = %v; server value must win", got)
+	}
+}
+
+// Agent format on GRAPH: the tool result's two representations both carry the
+// rendering instead of two copies of the JSON — the largest single saving in
+// this format, and the one that is invisible unless it is pinned.
+func TestEnrichResponse_GraphAgentFormat(t *testing.T) {
+	cfg := Config{
+		Format:        formatAgent,
+		RepoScheme:    func(string) (string, bool) { return "none", true },
+		RepoRemoteURL: func(string) (string, bool) { return "github.com/acme/api", true },
+	}
+	inner := graphResponse("internal/pay/charge.go", "internal/pay/card.go", false)
+	envelope, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1,
+		"result": map[string]any{
+			"content":           []map[string]any{{"type": "text", "text": string(inner)}},
+			"structuredContent": json.RawMessage(inner),
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	out := enrichResponse(cfg, envelope)
+
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(env["result"], &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	var structured struct {
+		Format    string `json:"format"`
+		Rendering string `json:"rendering"`
+	}
+	if err := json.Unmarshal(result["structuredContent"], &structured); err != nil {
+		t.Fatalf("unmarshal structuredContent: %v", err)
+	}
+	if structured.Format != formatAgent {
+		t.Errorf("structuredContent.format = %q, want %q", structured.Format, formatAgent)
+	}
+	if !strings.Contains(structured.Rendering, "codastre · graph") {
+		t.Errorf("structuredContent carries JSON, not the rendering: %s", structured.Rendering)
+	}
+
+	var content []map[string]json.RawMessage
+	if err := json.Unmarshal(result["content"], &content); err != nil {
+		t.Fatalf("unmarshal content: %v", err)
+	}
+	var text string
+	if err := json.Unmarshal(content[0]["text"], &text); err != nil {
+		t.Fatalf("unmarshal text block: %v", err)
+	}
+	if text != structured.Rendering {
+		t.Errorf("the two representations disagree:\n%q\n%q", text, structured.Rendering)
+	}
+	if !strings.Contains(text, "internal/pay/card.go") {
+		t.Errorf("rendering lost the destination path:\n%s", text)
+	}
+}
+
+// Without the agent format the JSON path is untouched: the enriched envelope
+// still ships as JSON in both representations.
+func TestEnrichResponse_GraphJSONFormatUnchanged(t *testing.T) {
+	cfg := Config{RepoScheme: func(string) (string, bool) { return "none", true }}
+	inner := graphResponse("a.go", "b.go", false)
+	envelope, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1,
+		"result": map[string]any{
+			"content":           []map[string]any{{"type": "text", "text": string(inner)}},
+			"structuredContent": json.RawMessage(inner),
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	out := enrichResponse(cfg, envelope)
+
+	if !strings.Contains(string(out), `\"edges\"`) && !strings.Contains(string(out), `"edges"`) {
+		t.Errorf("JSON-format GRAPH result was rewritten as text: %s", out)
+	}
+	if strings.Contains(string(out), "codastre · graph") {
+		t.Errorf("JSON-format GRAPH result carries a rendering: %s", out)
 	}
 }

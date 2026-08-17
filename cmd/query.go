@@ -283,33 +283,21 @@ func queryErrorHint(err error) error {
 	return err
 }
 
-// Output formats for `codastre query`. `agent` is a third value of the existing
-// --format enum rather than a new mechanism: the same rendering the MCP proxy
-// emits (mcpshim/render.go), so a person and an agent reading the CLI see the
-// same two shapes the MCP path offers.
+// Output formats for `codastre query` and `codastre graph`. `agent` is a third
+// value of the existing --format enum rather than a new mechanism: the same
+// rendering the MCP proxy emits (mcpshim/render.go, render_graph.go), so a
+// person and an agent reading the CLI see the same two shapes the MCP path
+// offers.
 const (
 	formatHuman = "human"
 	formatJSON  = "json"
 	formatAgent = "agent"
 )
 
-// wantJSON is the two-shape resolver, for commands with no agent rendering.
-// GRAPH is one: it returns edges and never bodies, so it has none of the
-// JSON-escaping cost that motivates the text shape (plan open question 4).
-func wantJSON(jsonFlag bool, format string) (bool, error) {
-	switch format {
-	case formatJSON:
-		return true, nil
-	case formatHuman, "":
-		return jsonFlag, nil
-	default:
-		return false, fmt.Errorf("invalid --format %q: want human or json", format)
-	}
-}
-
-// resolveFormat resolves the --json / --format flags into one format. It is
-// tri-state because a bool cannot express three: the legacy --json bool folds
-// in as a synonym for --format json when no explicit format was given.
+// resolveFormat resolves the --json / --format flags into one format, for every
+// command that renders. It is tri-state because a bool cannot express three: the
+// legacy --json bool folds in as a synonym for --format json when no explicit
+// format was given.
 func resolveFormat(jsonFlag bool, format string) (string, error) {
 	switch format {
 	case formatJSON, formatAgent:

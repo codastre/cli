@@ -1,6 +1,9 @@
 package mcpshim
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"slices"
+)
 
 // Advertising the client-only hydration arguments.
 //
@@ -17,6 +20,11 @@ import "encoding/json"
 // rather than the server half alone. A client talking to /mcp directly still sees
 // the unannotated schema, which is correct: there, the arguments genuinely do not
 // exist.
+//
+// The same applies to the `agent` rung of `format` on QUERY and GRAPH. That one
+// is not a client-only argument but a client-only *value*: the server owns
+// `format` and produces verbose/compact, and only the rendering happens here — so
+// the proxy extends the published enum instead of declaring a second argument.
 const (
 	snippetsArgDescription = "Set false to skip snippet bodies and return ranked " +
 		"locations only (path + line span + score). Use it for orientation calls " +
@@ -38,18 +46,25 @@ const (
 		"per file instead of once per hit, bodies as source with real line " +
 		"numbers instead of JSON-escaped strings. Pair it with snippets=false " +
 		"for the cheapest locate call."
+
+	// graphFormatAgentNote is the same rung on GRAPH, described in GRAPH's terms:
+	// there are no bodies here, so the saving is the repetition a traversal
+	// creates — every edge out of one function repeats that function's path.
+	graphFormatAgentNote = " Through the codastre CLI proxy a third value is " +
+		"available: 'agent' renders the traversal as text — edges grouped under " +
+		"their source file, so a fan-out writes that file's path once instead of " +
+		"once per edge, and paths are unmasked to real ones."
 )
 
 // annotateToolList injects the client-only hydration arguments into the QUERY
-// tool's inputSchema in a tools/list response. Returns data unchanged when the
-// message is not a tools/list result, or when there is nothing to tune.
+// tool's inputSchema in a tools/list response, and the extra `agent` format on
+// both QUERY and GRAPH. Returns data unchanged when the message is not a
+// tools/list result, or when there is nothing to tune.
 func annotateToolList(cfg Config, data []byte) []byte {
-	// Nothing to advertise when this proxy will not hydrate anyway: with
-	// hydration off process-wide, or with no way to resolve paths at all, a
-	// per-call dial would be a control that does nothing. Note the asymmetry is
-	// deliberate — the overrides can turn hydration off, never on, so the
-	// operator's `--no-snippets` stays the floor.
-	if cfg.NoSnippets || !cfg.canEnrich() {
+	// Nothing to advertise when this proxy cannot resolve paths at all: it then
+	// enriches nothing and renders nothing, so every argument added here would
+	// be a control that does nothing.
+	if !cfg.canEnrich() {
 		return data
 	}
 
@@ -68,10 +83,21 @@ func annotateToolList(cfg Config, data []byte) []byte {
 
 	changed := false
 	for i, tool := range tools {
-		if name, _ := unmarshalString(tool["name"]); name != "QUERY" {
+		name, _ := unmarshalString(tool["name"])
+		var schema json.RawMessage
+		var ok bool
+		switch name {
+		case "QUERY":
+			// Hydration is QUERY's alone, and only offered when this proxy will
+			// actually hydrate: the overrides can turn hydration off, never on,
+			// so the operator's `--no-snippets` stays the floor. The format rung
+			// is independent of it — a rendering costs no hydration.
+			schema, ok = withQueryArgs(tool["inputSchema"], !cfg.NoSnippets)
+		case "GRAPH":
+			schema, ok = withFormatArg(tool["inputSchema"], graphFormatAgentNote)
+		default:
 			continue
 		}
-		schema, ok := withHydrationArgs(tool["inputSchema"])
 		if !ok {
 			continue
 		}
@@ -101,13 +127,13 @@ func annotateToolList(cfg Config, data []byte) []byte {
 }
 
 // extendFormatEnum adds "agent" to the server's `format` property — its enum and
-// its description — and reports whether it changed anything.
+// its description, extended with note — and reports whether it changed anything.
 //
 // Additive on purpose. The server owns this argument's meaning and documents
 // verbose/compact itself; restating them here would be a second copy to keep in
 // step. A server that has not shipped `format` yet has no property to extend, so
 // nothing is added and no phantom argument is advertised.
-func extendFormatEnum(props map[string]json.RawMessage) bool {
+func extendFormatEnum(props map[string]json.RawMessage, note string) bool {
 	raw, ok := props[argFormat]
 	if !ok {
 		return false
@@ -120,15 +146,13 @@ func extendFormatEnum(props map[string]json.RawMessage) bool {
 	if err := json.Unmarshal(prop["enum"], &values); err != nil {
 		return false
 	}
-	for _, v := range values {
-		if v == formatAgent {
-			return false // already advertised (a future server, or a re-annotation)
-		}
+	if slices.Contains(values, formatAgent) {
+		return false // already advertised (a future server, or a re-annotation)
 	}
 	prop["enum"], _ = json.Marshal(append(values, formatAgent))
 
 	if desc, ok := unmarshalString(prop["description"]); ok {
-		prop["description"], _ = json.Marshal(desc + formatAgentNote)
+		prop["description"], _ = json.Marshal(desc + note)
 	}
 	updated, err := json.Marshal(prop)
 	if err != nil {
@@ -138,10 +162,55 @@ func extendFormatEnum(props map[string]json.RawMessage) bool {
 	return true
 }
 
-// withHydrationArgs returns schemaRaw with the two hydration properties added.
-// Existing properties of the same name are left alone: if a future server starts
+// withFormatArg returns schemaRaw with `agent` added to the server's format
+// enum, for a tool that has no client-only arguments of its own (GRAPH).
+func withFormatArg(schemaRaw json.RawMessage, note string) (json.RawMessage, bool) {
+	return withArgs(schemaRaw, func(props map[string]json.RawMessage) bool {
+		return extendFormatEnum(props, note)
+	})
+}
+
+// withQueryArgs returns schemaRaw with `agent` on the format enum and, when
+// hydration is offered, the two client-only hydration properties. Existing
+// properties of the same name are left alone: if a future server starts
 // declaring them, its definition wins over this local one.
-func withHydrationArgs(schemaRaw json.RawMessage) (json.RawMessage, bool) {
+func withQueryArgs(schemaRaw json.RawMessage, hydration bool) (json.RawMessage, bool) {
+	return withArgs(schemaRaw, func(props map[string]json.RawMessage) bool {
+		// `format` is the server's argument; the proxy only adds its extra value
+		// to the enum the server published, so a strict client will send it.
+		added := extendFormatEnum(props, formatAgentNote)
+		if !hydration {
+			return added
+		}
+		for name, def := range map[string]any{
+			argSnippets: map[string]any{
+				"type":        "boolean",
+				"default":     true,
+				"description": snippetsArgDescription,
+			},
+			argMaxSnippetLines: map[string]any{
+				"type":        "integer",
+				"minimum":     0,
+				"description": maxSnippetLinesArgDescription,
+			},
+		} {
+			if _, exists := props[name]; exists {
+				continue
+			}
+			b, err := json.Marshal(def)
+			if err != nil {
+				continue
+			}
+			props[name] = b
+			added = true
+		}
+		return added
+	})
+}
+
+// withArgs applies mutate to a tool inputSchema's properties map and re-marshals
+// it, reporting false when there was nothing to parse or nothing to add.
+func withArgs(schemaRaw json.RawMessage, mutate func(map[string]json.RawMessage) bool) (json.RawMessage, bool) {
 	if len(schemaRaw) == 0 {
 		return nil, false
 	}
@@ -155,36 +224,7 @@ func withHydrationArgs(schemaRaw json.RawMessage) (json.RawMessage, bool) {
 			return nil, false
 		}
 	}
-	added := false
-
-	// `format` is the server's argument; the proxy only adds its extra value to
-	// the enum the server published, so a strict client will send it.
-	if extendFormatEnum(props) {
-		added = true
-	}
-	for name, def := range map[string]any{
-		argSnippets: map[string]any{
-			"type":        "boolean",
-			"default":     true,
-			"description": snippetsArgDescription,
-		},
-		argMaxSnippetLines: map[string]any{
-			"type":        "integer",
-			"minimum":     0,
-			"description": maxSnippetLinesArgDescription,
-		},
-	} {
-		if _, exists := props[name]; exists {
-			continue
-		}
-		b, err := json.Marshal(def)
-		if err != nil {
-			return nil, false
-		}
-		props[name] = b
-		added = true
-	}
-	if !added {
+	if !mutate(props) {
 		return nil, false
 	}
 

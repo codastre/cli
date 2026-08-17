@@ -53,9 +53,9 @@ type Config struct {
 	// NoSnippets skips hydration entirely, returning ranked locations only. For
 	// cheap orientation queries where the paths are the answer.
 	NoSnippets bool
-	// Format is how a QUERY result is encoded: "json" (default, the server's
-	// envelope enriched in place) or "agent" (a text rendering — see render.go).
-	// Empty is "json".
+	// Format is how a QUERY or GRAPH result is encoded: "json" (default, the
+	// server's envelope enriched in place) or "agent" (a text rendering — see
+	// render.go and render_graph.go). Empty is "json".
 	Format string
 	// Log, when non-nil, receives one human-readable cost line per QUERY
 	// response. Must NOT be stdout: that carries the JSON-RPC stream.
@@ -307,10 +307,15 @@ func enrichToolPayload(cfg Config, result map[string]json.RawMessage) ([]byte, s
 		return enriched, "", true
 	}
 	if _, ok := env["edges"]; ok {
-		// GRAPH is not rendered: it returns edges, never bodies, so it has none
-		// of the JSON-escaping cost that motivates the text shape. Rendering it
-		// is worth measuring separately (plan open question 4).
-		return enrichGraphResponse(cfg, payload), "", true
+		enriched := enrichGraphResponse(cfg, payload)
+		if cfg.Format == formatAgent {
+			// Same fallback rule as QUERY: half an answer in the caller's
+			// preferred shape is worse than the whole answer in the other one.
+			if text, ok := renderGraphText(enriched, RenderOptions{}); ok {
+				return enriched, text, true
+			}
+		}
+		return enriched, "", true
 	}
 	return nil, "", false
 }

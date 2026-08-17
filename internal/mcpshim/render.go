@@ -189,6 +189,12 @@ func groupResults(results []renderResult) []fileGroup {
 type RenderOptions struct {
 	NoSnippets bool
 	Unmask     func(pathToken string, maskKeyRev int) (string, bool)
+	// RepoLabel resolves a repo_id to a name for display, for envelopes whose
+	// repos map carries no remote_url. GRAPH's does not — the server sends only
+	// masking metadata — so without this a traversal is headed by a bare UUID.
+	// Inside the proxy it is nil, because enrichGraphResponse has already
+	// backfilled the URLs; `codastre graph` holds the raw envelope and passes one.
+	RepoLabel func(repoID string) (string, bool)
 }
 
 // RenderQueryText renders a QUERY payload as agent text for callers outside this

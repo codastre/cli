@@ -61,33 +61,6 @@ func TestResolveTarget_Precedence(t *testing.T) {
 	})
 }
 
-func TestWantJSON(t *testing.T) {
-	cases := []struct {
-		flag   bool
-		format string
-		want   bool
-		errs   bool
-	}{
-		{false, "human", false, false},
-		{true, "human", true, false},
-		{false, "json", true, false},
-		{false, "", false, false},
-		{false, "xml", false, true},
-	}
-	for _, c := range cases {
-		got, err := wantJSON(c.flag, c.format)
-		if c.errs {
-			if err == nil {
-				t.Errorf("wantJSON(%v,%q): expected error", c.flag, c.format)
-			}
-			continue
-		}
-		if err != nil || got != c.want {
-			t.Errorf("wantJSON(%v,%q) = %v,%v; want %v", c.flag, c.format, got, err, c.want)
-		}
-	}
-}
-
 func TestRenderQueryHuman_MultiRepo(t *testing.T) {
 	payload := mustJSON(t, map[string]any{
 		"status":         "ok",

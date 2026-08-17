@@ -20,11 +20,13 @@ const (
 	argSnippets = "snippets"
 	// argFormat is shared with the server, which is why it is handled differently
 	// from the two above: it is REWRITTEN rather than stripped. The three values
-	// form one ladder of increasing compaction —
+	// form one ladder of increasing compaction, on both QUERY and GRAPH —
 	//
 	//	verbose  server's full JSON item (default)
-	//	compact  server drops what a caller can't act on (query_shape.py)
-	//	agent    compact, and this proxy renders it as text (render.go)
+	//	compact  server drops what a caller can't act on
+	//	         (query_shape.py / graph_shape.py)
+	//	agent    compact, and this proxy renders it as text
+	//	         (render.go / render_graph.go)
 	//
 	// One knob rather than a client `format` beside a server `format`: from the
 	// caller's side "how compact do you want the answer" is a single question,
@@ -138,9 +140,9 @@ func takeCallOverrides(body []byte) ([]byte, callOverrides) {
 		delete(args, argSnippets)
 		stripped = true
 	}
-	// QUERY-only: it is the one tool that declares `format`, and rewriting a
-	// same-named argument on another tool would corrupt that call.
-	if toolName, _ := unmarshalString(params["name"]); toolName == "QUERY" {
+	// QUERY and GRAPH only: they are the tools that declare `format`, and
+	// rewriting a same-named argument on any other tool would corrupt that call.
+	if toolName, _ := unmarshalString(params["name"]); toolName == "QUERY" || toolName == "GRAPH" {
 		if raw, ok := args[argFormat]; ok {
 			if value, ok := unmarshalString(raw); ok {
 				out.format = &value
