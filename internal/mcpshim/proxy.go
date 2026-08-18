@@ -252,15 +252,13 @@ func enrichResponse(cfg Config, data []byte) []byte {
 		return data
 	}
 	if rendering != "" {
-		// Agent format: both representations carry the rendering. QUERY declares
-		// an outputSchema, so a spec-strict client is entitled to
-		// structuredContent — but it is an open object, and filling it with the
-		// same text the content block holds keeps the result conformant without
-		// shipping a second, unread copy of the JSON. See render.go.
-		result["structuredContent"], _ = json.Marshal(map[string]string{
-			"format":    formatAgent,
-			"rendering": rendering,
-		})
+		// Agent format: the rendering goes in the content block, and
+		// structuredContent carries a summary rather than a second copy of it.
+		// QUERY declares an outputSchema, so a spec-strict client is entitled to
+		// structuredContent — but it is an open object, so what it is entitled to
+		// is an object, not the answer twice. See AgentSummary in render.go for
+		// the trade this makes and who loses it.
+		result["structuredContent"], _ = json.Marshal(agentSummary(enriched))
 		setContentText(result, []byte(rendering))
 	} else {
 		result["structuredContent"] = enriched

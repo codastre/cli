@@ -405,3 +405,74 @@ func formatScore(score float64) string {
 	s := strconv.FormatFloat(score, 'f', renderMaxScoreDigits, 64)
 	return strings.TrimPrefix(s, "0")
 }
+
+// AgentSummary is what `structuredContent` carries when the rendering goes in
+// the content block: the envelope fields a program branches on, and a pointer to
+// where the answer actually is.
+//
+// The alternative shipped first was to put the rendering in both, which is
+// conformant but pays for the payload twice — on a locate response that doubling
+// was the single largest remaining cost in the format, larger than every
+// field-level cut in it combined. QUERY's outputSchema is an open object
+// (`additionalProperties: true`), so nothing requires the second copy to be the
+// answer; it only requires an object to be there.
+//
+// This is a trade, not a free cut, and the losing side is real: a client that
+// reads *only* `structuredContent` and ignores the content block no longer gets
+// results. That is defensible here and nowhere else — `format: "agent"` is an
+// explicit request for a text rendering, so a caller that asks for it has said
+// which representation it reads. The default JSON format is untouched and still
+// carries the full payload in both.
+// Counts are pointers so that "no edges" and "this is not a traversal" stay
+// distinguishable: a QUERY summary must not report `edge_count: 0`, which reads
+// as an empty traversal rather than as the wrong question.
+type AgentSummary struct {
+	Format string `json:"format"`
+	// Status and Freshness are QUERY's; GRAPH's envelope carries neither.
+	Status    string `json:"status,omitempty"`
+	Freshness string `json:"freshness,omitempty"`
+	// Not "results"/"edges": those keys hold arrays in the verbose shape, and
+	// reusing them for a count would break a consumer that switched formats in
+	// the least visible way available.
+	ResultCount *int   `json:"result_count,omitempty"`
+	EdgeCount   *int   `json:"edge_count,omitempty"`
+	SyncJobID   string `json:"sync_job_id,omitempty"`
+	RenderingIn string `json:"rendering_in"`
+}
+
+// agentSummary builds the summary for an enriched QUERY or GRAPH payload.
+//
+// A payload that will not parse still gets the bare marker: the rendering is in
+// the content block either way, and failing to summarise it must not cost the
+// caller the answer.
+func agentSummary(payload []byte) AgentSummary {
+	s := AgentSummary{Format: formatAgent, RenderingIn: "content[0].text"}
+
+	// Which tool this is, by the array it carries — the same discrimination
+	// enrichPayload makes one level up.
+	var probe struct {
+		Results []json.RawMessage `json:"results"`
+		Edges   []json.RawMessage `json:"edges"`
+	}
+	if err := json.Unmarshal(payload, &probe); err != nil {
+		return s
+	}
+	if probe.Edges != nil {
+		n := len(probe.Edges)
+		s.EdgeCount = &n
+		return s
+	}
+
+	var env renderEnvelope
+	if err := json.Unmarshal(payload, &env); err != nil {
+		return s
+	}
+	n := len(env.Results)
+	s.ResultCount = &n
+	s.Status = env.Status
+	s.Freshness = env.Freshness
+	if env.SyncJobID != nil {
+		s.SyncJobID = *env.SyncJobID
+	}
+	return s
+}

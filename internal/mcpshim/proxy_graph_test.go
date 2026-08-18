@@ -308,18 +308,28 @@ func TestEnrichResponse_GraphAgentFormat(t *testing.T) {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
-	var structured struct {
-		Format    string `json:"format"`
-		Rendering string `json:"rendering"`
-	}
+	// structuredContent is a summary, not a second copy of the rendering: the
+	// duplication is what agent format exists to stop paying for.
+	var structured AgentSummary
 	if err := json.Unmarshal(result["structuredContent"], &structured); err != nil {
 		t.Fatalf("unmarshal structuredContent: %v", err)
 	}
 	if structured.Format != formatAgent {
 		t.Errorf("structuredContent.format = %q, want %q", structured.Format, formatAgent)
 	}
-	if !strings.Contains(structured.Rendering, "codastre · graph") {
-		t.Errorf("structuredContent carries JSON, not the rendering: %s", structured.Rendering)
+	if structured.EdgeCount == nil || *structured.EdgeCount != 1 {
+		t.Errorf("edge_count = %v, want 1", structured.EdgeCount)
+	}
+	// A traversal is not a search; reporting result_count on one would be a
+	// quietly wrong answer to a question the caller did not ask.
+	if structured.ResultCount != nil {
+		t.Errorf("result_count = %v on a GRAPH summary, want absent", *structured.ResultCount)
+	}
+	if structured.RenderingIn != "content[0].text" {
+		t.Errorf("rendering_in = %q, want content[0].text", structured.RenderingIn)
+	}
+	if n := len(result["structuredContent"]); n > 200 {
+		t.Errorf("structuredContent is %d B — a summary, not the payload again", n)
 	}
 
 	var content []map[string]json.RawMessage
@@ -330,8 +340,8 @@ func TestEnrichResponse_GraphAgentFormat(t *testing.T) {
 	if err := json.Unmarshal(content[0]["text"], &text); err != nil {
 		t.Fatalf("unmarshal text block: %v", err)
 	}
-	if text != structured.Rendering {
-		t.Errorf("the two representations disagree:\n%q\n%q", text, structured.Rendering)
+	if !strings.Contains(text, "codastre · graph") {
+		t.Errorf("content block carries JSON, not the rendering:\n%s", text)
 	}
 	if !strings.Contains(text, "internal/pay/card.go") {
 		t.Errorf("rendering lost the destination path:\n%s", text)

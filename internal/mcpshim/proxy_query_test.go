@@ -565,3 +565,100 @@ func firstResult(t *testing.T, out []byte) map[string]json.RawMessage {
 	}
 	return results[0]
 }
+
+// The saving §4 of the implementation report identified and then declined: an
+// MCP tool result carries the payload twice, and in agent format only one of the
+// two copies needs to be the answer.
+//
+// The trade is deliberate and asymmetric — a structuredContent-only client loses
+// the results — which is why it applies to `format: "agent"` alone, an explicit
+// request for a text rendering, and never to the JSON default.
+func TestEnrichResponse_QueryAgentFormatSummarisesStructuredContent(t *testing.T) {
+	const repoID = "reviewfy-uuid"
+	cfg := Config{
+		Format:     formatAgent,
+		NoSnippets: true,
+		RepoRoot:   "/nonexistent",
+		UnmaskPath: func(string, int) (string, bool) {
+			return "app/jobs/weekly_leaderboard_job.py", true
+		},
+	}
+
+	inner := queryResponse(repoID, "deadbeeftoken", 4)
+	envelope, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"result": map[string]any{
+			"content":           []map[string]any{{"type": "text", "text": string(inner)}},
+			"structuredContent": json.RawMessage(inner),
+			"isError":           false,
+		},
+	})
+
+	out := enrichResponse(cfg, envelope)
+
+	var env map[string]json.RawMessage
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var result map[string]json.RawMessage
+	_ = json.Unmarshal(env["result"], &result)
+
+	var structured AgentSummary
+	if err := json.Unmarshal(result["structuredContent"], &structured); err != nil {
+		t.Fatalf("unmarshal structuredContent: %v", err)
+	}
+	if structured.Format != formatAgent {
+		t.Errorf("format = %q, want %q", structured.Format, formatAgent)
+	}
+	if structured.Status != "ok" {
+		t.Errorf("status = %q, want ok — a program still has to tell an empty answer from a broken one", structured.Status)
+	}
+	if structured.ResultCount == nil || *structured.ResultCount != 1 {
+		t.Errorf("result_count = %v, want 1", structured.ResultCount)
+	}
+	// A search is not a traversal, and vice versa.
+	if structured.EdgeCount != nil {
+		t.Errorf("edge_count = %v on a QUERY summary, want absent", *structured.EdgeCount)
+	}
+
+	var content []map[string]json.RawMessage
+	_ = json.Unmarshal(result["content"], &content)
+	var text string
+	_ = json.Unmarshal(content[0]["text"], &text)
+	if !strings.Contains(text, "app/jobs/weekly_leaderboard_job.py") {
+		t.Errorf("content block is not the rendering:\n%s", text)
+	}
+
+	// The point of the change: the result is one copy of the answer plus a
+	// fixed-size summary, not two copies. Bounded absolutely rather than as a
+	// fraction of the rendering — the summary does not scale with the payload,
+	// which is the property, and on a one-hit fixture it is legitimately a large
+	// fraction of a very small rendering.
+	if got := len(result["structuredContent"]); got > 256 {
+		t.Errorf("structuredContent is %d B — a summary, not the payload again", got)
+	}
+}
+
+// The property the byte bound above is a proxy for: the summary is fixed-size.
+// A hundredfold larger response must not make it meaningfully larger, or the
+// duplication has crept back in proportional form.
+func TestAgentSummary_DoesNotScaleWithThePayload(t *testing.T) {
+	build := func(n int) []byte {
+		results := make([]map[string]any, n)
+		for i := range results {
+			results[i] = map[string]any{
+				"repo_id": "r", "path_token": strings.Repeat("deep/nested/path/", 8),
+				"line_start": i, "line_end": i + 20, "score": 0.5,
+			}
+		}
+		b, _ := json.Marshal(map[string]any{"status": "ok", "freshness": "fresh", "results": results})
+		return b
+	}
+
+	small, _ := json.Marshal(agentSummary(build(1)))
+	large, _ := json.Marshal(agentSummary(build(50)))
+	if delta := len(large) - len(small); delta > 8 {
+		t.Errorf("summary grew %d B between a 1-hit and a 50-hit payload; it must not scale", delta)
+	}
+}
