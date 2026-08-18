@@ -157,6 +157,13 @@ func TestTakeCallOverrides_Format(t *testing.T) {
 		{"agent is rewritten to compact", "agent", "compact", formatAgent},
 		{"compact is forwarded", "compact", "compact", formatJSON},
 		{"verbose is forwarded", "verbose", "verbose", formatJSON},
+		// "json" is the Config spelling (serve --format json, and the env var),
+		// not a wire value — the server's enum is verbose|compact. It is a
+		// synonym for verbose rather than a value left to strand: without the
+		// rewrite it reached the server unchanged, and without a case in apply
+		// it silently inherited `serve --format agent` and came back as text —
+		// the one spelling of "I want JSON" that did not get JSON.
+		{"json is rewritten to verbose", "json", "verbose", formatJSON},
 		// An unknown value is the server's to reject: INVALID_REQUEST from the
 		// tool that owns the argument beats a silent fallback here.
 		{"unknown is forwarded untouched", "xml", "xml", ""},

@@ -42,17 +42,30 @@ const (
 // same rung when it is going to render the result as agent text.
 const WireFormatCompact = "compact"
 
-// The values argFormat accepts. Anything else is forwarded untouched so the
-// server answers it — an unknown format is a caller mistake, and INVALID_REQUEST
-// from the tool that owns the argument beats a silent fallback here.
+// The WIRE values of argFormat — the rungs a request can carry. Anything outside
+// this set is forwarded untouched so the server answers it: an unknown format is
+// a caller mistake, and INVALID_REQUEST from the tool that owns the argument
+// beats a silent fallback here.
 const (
 	formatVerbose = "verbose"
 	formatCompact = WireFormatCompact
-	formatAgent   = "agent"
-	// formatJSON is the Config-level spelling for "do not render". It is not a
-	// wire value: on the wire, both verbose and compact mean JSON.
-	formatJSON = "json"
+	// formatAgent is the one wire value the server cannot honour: it travels as
+	// compact and this proxy renders the result as text. See takeCallOverrides.
+	formatAgent = "agent"
 )
+
+// formatJSON is a CONFIG-level spelling of "do not render", deliberately kept
+// out of the block above: it is not a wire value, because on the wire both
+// verbose and compact already mean JSON.
+//
+// It is what `serve --format json` and $CODASTRE_QUERY_FORMAT set, so a caller
+// who read either — or the const block this used to share with the wire values —
+// will reach for it over MCP too. takeCallOverrides therefore accepts it as a
+// synonym for verbose rather than forwarding it to a server whose enum has no
+// such value. Without that, "json" was the one spelling of "I want JSON" that
+// did not get JSON: apply's switch had no case for it, so an explicit request
+// silently inherited `serve --format agent` and came back as text.
+const formatJSON = "json"
 
 // callOverrides is one call's client-side settings. Absent fields leave the
 // Config's value alone, so a call that passes none behaves exactly as before.
@@ -79,7 +92,7 @@ func (o callOverrides) apply(cfg Config) Config {
 	case o.format == nil:
 	case *o.format == formatAgent:
 		cfg.Format = formatAgent
-	case *o.format == formatVerbose || *o.format == formatCompact:
+	case *o.format == formatVerbose || *o.format == formatCompact || *o.format == formatJSON:
 		cfg.Format = formatJSON
 	}
 	if o.snippets != nil && !*o.snippets {
@@ -152,13 +165,24 @@ func takeCallOverrides(body []byte) ([]byte, callOverrides) {
 		if raw, ok := args[argFormat]; ok {
 			if value, ok := unmarshalString(raw); ok {
 				out.format = &value
-				// Unlike the other two, format is a real server argument. Only the
-				// one value the server cannot produce is rewritten — and to
-				// `compact` rather than dropped, because agent rendering reads none
-				// of the fields compact omits, so a verbose copy would be paid for
-				// on the server → proxy hop and then discarded.
-				if value == formatAgent {
+				// Unlike the other two, format is a real server argument, so it is
+				// forwarded rather than stripped — verbose, compact and any
+				// unrecognised value all travel untouched. Only the two values the
+				// server has no definition for are rewritten:
+				switch value {
+				case formatAgent:
+					// To `compact`, not dropped: agent rendering reads none of the
+					// fields compact omits, so a verbose copy would be paid for on
+					// the server → proxy hop and then discarded.
 					args[argFormat], _ = json.Marshal(formatCompact)
+					stripped = true
+				case formatJSON:
+					// To `verbose`: "json" is the Config spelling (see formatJSON),
+					// and the server's enum is verbose|compact. Forwarding it as-is
+					// is inert against a server that ignores the argument and an
+					// INVALID_REQUEST against one that does not — for a value the
+					// CLI flag and the env var both accept.
+					args[argFormat], _ = json.Marshal(formatVerbose)
 					stripped = true
 				}
 			}
