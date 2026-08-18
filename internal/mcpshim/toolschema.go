@@ -47,6 +47,25 @@ const (
 		"numbers instead of JSON-escaped strings. Pair it with snippets=false " +
 		"for the cheapest locate call."
 
+	// queryFormatStandalone is QUERY's `format` description when this proxy has to
+	// declare the argument itself — see declareFormatArg. It restates only what
+	// the proxy can honour unaided, since there is no server text to extend.
+	queryFormatStandalone = "How compact a response to return. 'verbose' is the " +
+		"server's full JSON envelope (the default). 'agent' renders it as text — " +
+		"hits grouped by file, one path per file instead of once per hit, bodies " +
+		"as source with real line numbers instead of JSON-escaped strings. Pair " +
+		"'agent' with snippets=false for the cheapest locate call. Rendered by " +
+		"the codastre CLI proxy, so it does not depend on the server's own " +
+		"support for this argument."
+
+	// graphFormatStandalone is the same, in GRAPH's terms.
+	graphFormatStandalone = "How compact a traversal to return. 'verbose' is the " +
+		"server's full JSON envelope (the default). 'agent' renders it as text — " +
+		"edges grouped under their source file, so a fan-out writes that file's " +
+		"path once instead of once per edge, and paths are unmasked to real ones. " +
+		"Rendered by the codastre CLI proxy, so it does not depend on the " +
+		"server's own support for this argument."
+
 	// graphFormatAgentNote is the same rung on GRAPH, described in GRAPH's terms:
 	// there are no bodies here, so the saving is the repetition a traversal
 	// creates — every edge out of one function repeats that function's path.
@@ -94,7 +113,7 @@ func annotateToolList(cfg Config, data []byte) []byte {
 			// is independent of it — a rendering costs no hydration.
 			schema, ok = withQueryArgs(tool["inputSchema"], !cfg.NoSnippets)
 		case "GRAPH":
-			schema, ok = withFormatArg(tool["inputSchema"], graphFormatAgentNote)
+			schema, ok = withFormatArg(tool["inputSchema"], graphFormatAgentNote, graphFormatStandalone)
 		default:
 			continue
 		}
@@ -128,15 +147,16 @@ func annotateToolList(cfg Config, data []byte) []byte {
 
 // extendFormatEnum adds "agent" to the server's `format` property — its enum and
 // its description, extended with note — and reports whether it changed anything.
+// When the server publishes no `format` at all, it falls back to declaring one
+// (declareFormatArg) rather than leaving the rung unreachable.
 //
-// Additive on purpose. The server owns this argument's meaning and documents
-// verbose/compact itself; restating them here would be a second copy to keep in
-// step. A server that has not shipped `format` yet has no property to extend, so
-// nothing is added and no phantom argument is advertised.
-func extendFormatEnum(props map[string]json.RawMessage, note string) bool {
+// Extension is preferred where it is possible. The server owns this argument's
+// meaning and documents verbose/compact itself; restating them here would be a
+// second copy to keep in step.
+func extendFormatEnum(props map[string]json.RawMessage, note, standalone string) bool {
 	raw, ok := props[argFormat]
 	if !ok {
-		return false
+		return declareFormatArg(props, standalone)
 	}
 	var prop map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &prop); err != nil {
@@ -162,11 +182,52 @@ func extendFormatEnum(props map[string]json.RawMessage, note string) bool {
 	return true
 }
 
+// proxyFormatValues is the enum advertised when this proxy declares `format`
+// itself: the two rungs it can honour without server support.
+//
+// `compact` is omitted deliberately. It is the server's rung, and advertising it
+// against a server that cannot produce it would promise a saving that never
+// arrives — the failure mode this fallback exists to avoid, not to reproduce.
+var proxyFormatValues = []string{formatVerbose, formatAgent}
+
+// declareFormatArg publishes a proxy-owned `format` for a server that has not
+// shipped one.
+//
+// This used to return false, on the grounds that declaring an argument the
+// server does not know would be advertising a phantom. That reasoning holds for
+// the argument's *server* half and not for its client half: the `agent`
+// rendering is entirely local (render.go / render_graph.go), so the whole
+// measured saving of the rung is available the moment this binary runs,
+// regardless of the server's build. Withholding the advertisement withheld the
+// saving too — most MCP clients refuse to send an argument the schema does not
+// declare, which made `agent` unreachable over MCP while the CLI's own
+// `--format agent` worked against the same deployment.
+//
+// Forwarding is safe: `agent` travels as `compact` (takeCallOverrides), and a
+// server predating the argument ignores an unknown one rather than rejecting it
+// — verified against the deployed build, which answers a tools/call carrying
+// `format: "compact"` with a normal verbose envelope. A server that later ships
+// `format` publishes its own property, and the extension path above takes over.
+func declareFormatArg(props map[string]json.RawMessage, description string) bool {
+	def, err := json.Marshal(map[string]any{
+		"type":        "string",
+		"enum":        proxyFormatValues,
+		"default":     formatVerbose,
+		"description": description,
+	})
+	if err != nil {
+		return false
+	}
+	props[argFormat] = def
+	return true
+}
+
 // withFormatArg returns schemaRaw with `agent` added to the server's format
-// enum, for a tool that has no client-only arguments of its own (GRAPH).
-func withFormatArg(schemaRaw json.RawMessage, note string) (json.RawMessage, bool) {
+// enum — or a proxy-declared `format` when the server publishes none — for a
+// tool that has no client-only arguments of its own (GRAPH).
+func withFormatArg(schemaRaw json.RawMessage, note, standalone string) (json.RawMessage, bool) {
 	return withArgs(schemaRaw, func(props map[string]json.RawMessage) bool {
-		return extendFormatEnum(props, note)
+		return extendFormatEnum(props, note, standalone)
 	})
 }
 
@@ -178,7 +239,7 @@ func withQueryArgs(schemaRaw json.RawMessage, hydration bool) (json.RawMessage, 
 	return withArgs(schemaRaw, func(props map[string]json.RawMessage) bool {
 		// `format` is the server's argument; the proxy only adds its extra value
 		// to the enum the server published, so a strict client will send it.
-		added := extendFormatEnum(props, formatAgentNote)
+		added := extendFormatEnum(props, formatAgentNote, queryFormatStandalone)
 		if !hydration {
 			return added
 		}

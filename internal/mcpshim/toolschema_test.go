@@ -89,23 +89,37 @@ func TestAnnotateToolList_AdvertisesHydrationArgs(t *testing.T) {
 }
 
 // Advertising a dial that cannot move anything is worse than not advertising it:
-// the overrides can only turn hydration off, never back on. (The format rung is
-// separate — see TestAnnotateToolList_FormatSurvivesNoSnippets.)
+// the overrides can only turn hydration off, never back on. The format rung is
+// governed separately, because a rendering costs no hydration.
 func TestAnnotateToolList_SilentWhenHydrationUnavailable(t *testing.T) {
-	scheme := func(string) (string, bool) { return "none", true }
-	for name, cfg := range map[string]Config{
-		"no-snippets":   {RepoScheme: scheme, NoSnippets: true},
-		"cannot-enrich": {
-			// Neither an unmasker nor scheme knowledge: nothing is ever hydrated.
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			in := toolListResponse(t, "QUERY")
-			if got := annotateToolList(cfg, in); string(got) != string(in) {
-				t.Errorf("response was rewritten; want it untouched\n got: %s", got)
+	// Neither an unmasker nor scheme knowledge: this proxy enriches nothing and
+	// renders nothing, so the whole annotation is skipped — format included.
+	t.Run("cannot-enrich", func(t *testing.T) {
+		in := toolListResponse(t, "QUERY")
+		if got := annotateToolList(Config{}, in); string(got) != string(in) {
+			t.Errorf("response was rewritten; want it untouched\n got: %s", got)
+		}
+	})
+
+	// Hydration is off, so the two dials would be inert. The rendering is not:
+	// it reads the response the server already sent, so the rung stays on offer.
+	t.Run("no-snippets", func(t *testing.T) {
+		cfg := Config{
+			RepoScheme: func(string) (string, bool) { return "none", true },
+			NoSnippets: true,
+		}
+
+		props := toolSchemaProps(t, annotateToolList(cfg, toolListResponse(t, "QUERY")), "QUERY")
+
+		for _, name := range []string{argSnippets, argMaxSnippetLines} {
+			if _, ok := props[name]; ok {
+				t.Errorf("%q advertised while hydration is off", name)
 			}
-		})
-	}
+		}
+		if _, ok := props[argFormat]; !ok {
+			t.Error("format dropped with hydration; a rendering costs no hydration")
+		}
+	})
 }
 
 // Run passes every message through annotateToolList, including ones it knows
@@ -191,15 +205,39 @@ func TestAnnotateToolList_ExtendsFormatEnum(t *testing.T) {
 	}
 }
 
-// A server that has not shipped `format` has no property to extend. Advertising
-// one anyway would promise a compaction nothing implements.
-func TestAnnotateToolList_NoFormatPropertyToExtend(t *testing.T) {
+// A server that has not shipped `format` has no property to extend — but the
+// `agent` rendering is client-side, so the rung works against that server
+// anyway. The proxy declares the argument itself rather than leaving it
+// unreachable: most MCP clients refuse to send an argument the schema does not
+// declare, which stranded the whole rung behind a server deploy it does not
+// actually need.
+func TestAnnotateToolList_DeclaresFormatWhenServerHasNone(t *testing.T) {
 	cfg := Config{RepoScheme: func(string) (string, bool) { return "none", true }}
 
 	props := toolSchemaProps(t, annotateToolList(cfg, toolListResponse(t, "QUERY")), "QUERY")
 
-	if _, ok := props[argFormat]; ok {
-		t.Error("format advertised against a server that does not accept it")
+	raw, ok := props[argFormat]
+	if !ok {
+		t.Fatal("format not advertised; the agent rung is unreachable over MCP without it")
+	}
+	var format struct {
+		Enum        []string `json:"enum"`
+		Default     string   `json:"default"`
+		Description string   `json:"description"`
+	}
+	if err := json.Unmarshal(raw, &format); err != nil {
+		t.Fatalf("unmarshal format property: %v", err)
+	}
+	// Only the rungs this proxy can honour unaided. `compact` is the server's,
+	// and advertising it here would promise a saving that never arrives.
+	if got := strings.Join(format.Enum, ","); got != "verbose,agent" {
+		t.Errorf("enum = %q, want only the rungs the proxy can honour", got)
+	}
+	if format.Default != formatVerbose {
+		t.Errorf("default = %q, want %q", format.Default, formatVerbose)
+	}
+	if !strings.Contains(format.Description, "'agent'") {
+		t.Errorf("agent is in the enum but undocumented: %q", format.Description)
 	}
 	// The client-only arguments are still added: those the proxy does implement.
 	if _, ok := props[argSnippets]; !ok {
