@@ -89,6 +89,7 @@ var (
 	queryRepoPath        string
 	querySnippets        bool
 	queryMaxSnippetLines int
+	queryCorpora         bool
 )
 
 func init() {
@@ -120,10 +121,33 @@ func init() {
 	f.IntVar(&queryMaxSnippetLines, "max-snippet-lines", defaultMaxSnippetLines(),
 		"With --snippets, cap each body at N lines; truncated ones say where the "+
 			"rest is (0 = built-in default) [$CODASTRE_MAX_SNIPPET_LINES]")
+	// Discovery-shaped alias. It lives on `query` because that is the command a
+	// caller reaches for first, and the whole failure this addresses is not
+	// knowing that chunk ranking was the wrong unit for the question being
+	// asked — a caller who already knew would have typed `codastre corpora`.
+	f.BoolVar(&queryCorpora, "corpora", false,
+		"Rank CORPORA instead of chunks — same as 'codastre corpora'. Use for "+
+			"ticket prose or a name, when the question is what to open")
 	rootCmd.AddCommand(queryCmd)
 }
 
 func runQuery(cmd *cobra.Command, args []string) error {
+	if queryCorpora {
+		// Carry over the flags the two commands share, so the alias behaves as
+		// the flag it looks like rather than as a differently-configured command.
+		corporaServerURL, corporaKey = queryServerURL, queryKey
+		corporaLanguage, corporaContentKinds = queryLanguage, queryContentKinds
+		corporaJSON, corporaFormat = queryJSON, queryFormat
+		corporaNoUnmask, corporaRepoPath = queryNoUnmask, queryRepoPath
+		// query's --top-k default is 6, tuned for chunk bodies; a corpus list is
+		// one line plus a few locations per entry. Only an explicit value carries.
+		corporaTopK = 10
+		if cmd.Flags().Changed("top-k") {
+			corporaTopK = queryTopK
+		}
+		return runCorpora(cmd, args)
+	}
+
 	format, err := resolveFormat(queryJSON, queryFormat)
 	if err != nil {
 		return err
