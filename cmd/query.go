@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/codastre/cli/internal/mcpclient"
@@ -127,12 +128,64 @@ func init() {
 	// asked — a caller who already knew would have typed `codastre corpora`.
 	f.BoolVar(&queryCorpora, "corpora", false,
 		"Rank CORPORA instead of chunks — same as 'codastre corpora'. Use for "+
-			"ticket prose or a name, when the question is what to open")
+			"ticket prose or a name, when the question is what to open. Always "+
+			"federated, so it rejects --index-id/--repo-url/--all and the "+
+			"per-result filters rather than ignoring them")
 	rootCmd.AddCommand(queryCmd)
+}
+
+// corporaFlagConflicts partitions the `query` flags that the corpus path does
+// not implement into the ones that must fail and the ones worth a warning.
+//
+// The split is by consequence, not by taste: a flag that would have changed
+// WHICH corpora rank is an error, because dropping it silently returns a
+// confident answer to a different question. A flag that only affects how the
+// results are printed is a warning — the ranking is still the one that was
+// asked for.
+func corporaFlagConflicts(changed func(string) bool) (errs []string, warns []string) {
+	// Target selection: corpus ranking surveys everything visible by design.
+	// Scoping it to one repo is not a narrower version of the question, it is a
+	// different question — that is what `codastre query` already answers.
+	for _, f := range []string{"index-id", "repo-url", "all"} {
+		if changed(f) {
+			errs = append(errs, "--"+f)
+		}
+	}
+	// Result filters with no CORPUS_SEARCH equivalent. They would have excluded
+	// evidence, so ignoring them changes the ranking.
+	for _, f := range []string{"ref", "path-prefix", "alert-ids", "error-codes"} {
+		if changed(f) {
+			errs = append(errs, "--"+f)
+		}
+	}
+	// Presentation only: a corpus answer is locations, never bodies.
+	for _, f := range []string{"snippets", "max-snippet-lines"} {
+		if changed(f) {
+			warns = append(warns, "--"+f)
+		}
+	}
+	return errs, warns
 }
 
 func runQuery(cmd *cobra.Command, args []string) error {
 	if queryCorpora {
+		// Flags that do not exist on the corpus path are rejected or reported,
+		// never silently dropped. `--corpora --repo-url X` reads as "rank corpora
+		// within this repo", which is not a question this mode can answer, and
+		// honouring neither half of it quietly is how a caller ends up trusting
+		// an answer to a question they did not ask.
+		bad, ignored := corporaFlagConflicts(cmd.Flags().Changed)
+		if len(bad) > 0 {
+			return fmt.Errorf("--corpora cannot be combined with %s: corpus ranking "+
+				"is always federated and takes no per-result filters — drop the flag, "+
+				"or run the query without --corpora", strings.Join(bad, ", "))
+		}
+		for _, f := range ignored {
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"warning: %s has no effect with --corpora (a corpus answer lists "+
+					"locations, not bodies)\n", f)
+		}
+
 		// Carry over the flags the two commands share, so the alias behaves as
 		// the flag it looks like rather than as a differently-configured command.
 		corporaServerURL, corporaKey = queryServerURL, queryKey

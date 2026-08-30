@@ -103,3 +103,63 @@ func TestDecodeCorpusSearch_RejectsGarbage(t *testing.T) {
 		t.Fatal("decode accepted non-JSON")
 	}
 }
+
+// --corpora is an alias, not a mode with its own flag set: `query` carries
+// flags that CORPUS_SEARCH has no equivalent for. Silently dropping them would
+// answer a different question than the one typed.
+
+func TestCorporaFlagConflicts_TargetFlagsAreErrors(t *testing.T) {
+	for _, flag := range []string{"index-id", "repo-url", "all"} {
+		errs, warns := corporaFlagConflicts(func(f string) bool { return f == flag })
+		if len(errs) != 1 || errs[0] != "--"+flag {
+			t.Fatalf("%s: errs = %v, want [--%s]", flag, errs, flag)
+		}
+		if len(warns) != 0 {
+			t.Fatalf("%s: unexpected warns %v", flag, warns)
+		}
+	}
+}
+
+func TestCorporaFlagConflicts_ResultFiltersAreErrors(t *testing.T) {
+	// These would have excluded evidence, so ignoring them changes the ranking.
+	for _, flag := range []string{"ref", "path-prefix", "alert-ids", "error-codes"} {
+		errs, _ := corporaFlagConflicts(func(f string) bool { return f == flag })
+		if len(errs) != 1 || errs[0] != "--"+flag {
+			t.Fatalf("%s: errs = %v, want [--%s]", flag, errs, flag)
+		}
+	}
+}
+
+func TestCorporaFlagConflicts_PresentationFlagsOnlyWarn(t *testing.T) {
+	// A corpus answer is locations, never bodies — the ranking is unaffected.
+	for _, flag := range []string{"snippets", "max-snippet-lines"} {
+		errs, warns := corporaFlagConflicts(func(f string) bool { return f == flag })
+		if len(errs) != 0 {
+			t.Fatalf("%s: should not error, got %v", flag, errs)
+		}
+		if len(warns) != 1 || warns[0] != "--"+flag {
+			t.Fatalf("%s: warns = %v, want [--%s]", flag, warns, flag)
+		}
+	}
+}
+
+func TestCorporaFlagConflicts_SharedFlagsPassThrough(t *testing.T) {
+	// The flags both commands implement must not trip either list, or the alias
+	// would reject its own supported surface.
+	shared := map[string]bool{
+		"server": true, "key": true, "language": true, "content-kinds": true,
+		"json": true, "format": true, "no-unmask": true, "repo-path": true,
+		"top-k": true, "corpora": true,
+	}
+	errs, warns := corporaFlagConflicts(func(f string) bool { return shared[f] })
+	if len(errs) != 0 || len(warns) != 0 {
+		t.Fatalf("shared flags tripped: errs=%v warns=%v", errs, warns)
+	}
+}
+
+func TestCorporaFlagConflicts_NothingSetIsClean(t *testing.T) {
+	errs, warns := corporaFlagConflicts(func(string) bool { return false })
+	if len(errs) != 0 || len(warns) != 0 {
+		t.Fatalf("errs=%v warns=%v", errs, warns)
+	}
+}
