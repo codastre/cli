@@ -133,6 +133,7 @@ func connectClaude(cmd *cobra.Command, name, mcpURL, serverURL, apiKey, scope st
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "%s MCP server %q → %s\n", verb, name, path)
 	printModeHint(cmd, stdio)
+	printIntegrationHint(cmd, "claude", serverURL)
 	return nil
 }
 

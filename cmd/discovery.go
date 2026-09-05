@@ -13,9 +13,10 @@ import (
 // exposes at GET /v1/system/discovery so the CLI can auto-discover deployment
 // URLs instead of relying on hardcoded localhost defaults.
 type serverDiscovery struct {
-	DashboardURL  string `json:"dashboard_url"`
-	ServerBaseURL string `json:"server_base_url"`
-	Version       string `json:"version"`
+	DashboardURL  string             `json:"dashboard_url"`
+	ServerBaseURL string             `json:"server_base_url"`
+	Version       string             `json:"version"`
+	Integrations  integrationsSource `json:"integrations"`
 }
 
 // discover fetches the server's public discovery document. It is best-effort:

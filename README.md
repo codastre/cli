@@ -82,6 +82,22 @@ HEAD watcher keeps the active branch in sync as you work. Point at a self-hosted
 server with `--server https://codastre.your-domain.com` (or `$CODASTRE_SERVER`); the
 dashboard URL is auto-discovered, so there's nothing else to configure.
 
+Step 3 makes Codastre *available* to your agent. An **integration** makes it *reach for
+it* — ready-made commands, skills that load themselves on search and structural
+questions, and hooks that steer the agent off `grep`. Claude Code has one today, shipped
+as a plugin:
+
+```bash
+claude plugin marketplace add codastre/integrations
+claude plugin install codastre@codastre-plugins --scope project
+```
+
+`codastre connect claude` prints those two lines for you, pointing at whichever source
+your server publishes (a self-hosted deployment usually mirrors the integrations into an
+internal marketplace). The plugin ships its own `codastre serve` MCP entry, so it also
+covers step 3. Codex and opencode have no integration yet — they get the same tools over
+MCP from step 3 alone.
+
 Step 2 is what makes a hit show code instead of just naming a file. Snippets are
 hydrated from a local clone, so a repo codastre can't find on disk still matches
 searches but comes back as bare `path:line` locators. One `scan` of the directory your
