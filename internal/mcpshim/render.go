@@ -406,28 +406,43 @@ func formatScore(score float64) string {
 	return strings.TrimPrefix(s, "0")
 }
 
-// AgentSummary is what `structuredContent` carries when the rendering goes in
-// the content block: the envelope fields a program branches on, and a pointer to
-// where the answer actually is.
+// AgentSummary is what `structuredContent` carries in agent format: the
+// rendering, plus the envelope fields a program branches on without parsing it.
 //
-// The alternative shipped first was to put the rendering in both, which is
-// conformant but pays for the payload twice — on a locate response that doubling
-// was the single largest remaining cost in the format, larger than every
-// field-level cut in it combined. QUERY's outputSchema is an open object
-// (`additionalProperties: true`), so nothing requires the second copy to be the
-// answer; it only requires an object to be there.
+// An MCP tool result carries its payload in both `content[0].text` and
+// `structuredContent`, and the rendering rides in both. That doubling was
+// briefly cut — structuredContent held a summary and a `rendering_in` pointer to
+// the content block, which is conformant (QUERY's outputSchema is an open
+// object, so what a strict client is entitled to is an object, not the answer
+// twice) and was the single largest remaining saving in the format.
 //
-// This is a trade, not a free cut, and the losing side is real: a client that
-// reads *only* `structuredContent` and ignores the content block no longer gets
-// results. That is defensible here and nowhere else — `format: "agent"` is an
-// explicit request for a text rendering, so a caller that asks for it has said
-// which representation it reads. The default JSON format is untouched and still
-// carries the full payload in both.
+// It is also how the answer disappears. Against the deployed proxy, a live
+// `format: "agent"` QUERY returned this, in full, to a client that reads
+// structuredContent and never looks at the content block:
+//
+//	{"format":"agent","status":"ok","freshness":"fresh","result_count":3,
+//	 "rendering_in":"content[0].text"}
+//
+// Three hits found, three reported, none delivered — a plausible empty result,
+// which is the one failure mode this project's own rule forbids outright: a
+// misconfigured boundary must produce an error or a warning, never a confident
+// empty answer. No single-copy placement avoids it: whichever representation is
+// left holding a pointer, some client reads only that one.
+//
+// So the duplication is paid deliberately, and the measured numbers in
+// docs/plans/agent-response-format.md — −15% with bodies on, −66% on the locate
+// tier — are the numbers for *this* shape: they were taken before the summary
+// cut and already include both copies.
+//
 // Counts are pointers so that "no edges" and "this is not a traversal" stay
 // distinguishable: a QUERY summary must not report `edge_count: 0`, which reads
 // as an empty traversal rather than as the wrong question.
 type AgentSummary struct {
 	Format string `json:"format"`
+	// The answer. Same key and same position as the server's own agent response
+	// (server/api/agent_render.py), so a caller reads one shape whether it is
+	// talking through this proxy or straight to /mcp.
+	Rendering string `json:"rendering"`
 	// Status and Freshness are QUERY's; GRAPH's envelope carries neither.
 	Status    string `json:"status,omitempty"`
 	Freshness string `json:"freshness,omitempty"`
@@ -437,16 +452,16 @@ type AgentSummary struct {
 	ResultCount *int   `json:"result_count,omitempty"`
 	EdgeCount   *int   `json:"edge_count,omitempty"`
 	SyncJobID   string `json:"sync_job_id,omitempty"`
-	RenderingIn string `json:"rendering_in"`
 }
 
-// agentSummary builds the summary for an enriched QUERY or GRAPH payload.
+// agentSummary builds the structured half of an agent-format result: the
+// rendering, plus what could be summarised from the enriched QUERY or GRAPH
+// payload it was rendered from.
 //
-// A payload that will not parse still gets the bare marker: the rendering is in
-// the content block either way, and failing to summarise it must not cost the
-// caller the answer.
-func agentSummary(payload []byte) AgentSummary {
-	s := AgentSummary{Format: formatAgent, RenderingIn: "content[0].text"}
+// A payload that will not parse still carries the rendering: failing to
+// summarise an answer must not cost the caller the answer.
+func agentSummary(payload []byte, rendering string) AgentSummary {
+	s := AgentSummary{Format: formatAgent, Rendering: rendering}
 
 	// Which tool this is, by the array it carries — the same discrimination
 	// enrichPayload makes one level up.

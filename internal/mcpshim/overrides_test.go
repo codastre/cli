@@ -33,6 +33,12 @@ func callArguments(t *testing.T, body []byte) map[string]json.RawMessage {
 	return msg.Params.Arguments
 }
 
+// renderingProxy is a Config that CAN enrich, which is what decides whether this
+// proxy takes over `format: agent` or leaves it for the server to render. Most
+// of these cases are about the argument plumbing rather than that choice, so
+// they run against the configuration a real `codastre serve` has.
+var renderingProxy = Config{RepoScheme: func(string) (string, bool) { return "none", true }}
+
 // The client-only arguments must never reach the server: QUERY's tool schema
 // doesn't declare them, so forwarding one turns a cost hint into a validation
 // error. Everything else in the call has to survive untouched.
@@ -45,7 +51,7 @@ func TestTakeHydrationOverrides_StripsClientOnlyArgs(t *testing.T) {
 		"snippets":          false,
 	})
 
-	out, ov := takeCallOverrides(body)
+	out, ov := takeCallOverrides(renderingProxy, body)
 
 	args := callArguments(t, out)
 	for _, k := range []string{argMaxSnippetLines, argSnippets} {
@@ -76,7 +82,7 @@ func TestTakeHydrationOverrides_PassesOtherMessagesThroughUnchanged(t *testing.T
 		[]byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`),
 		[]byte(`not json at all`),
 	} {
-		out, ov := takeCallOverrides(body)
+		out, ov := takeCallOverrides(renderingProxy, body)
 		if string(out) != string(body) {
 			t.Errorf("body rewritten:\n got %s\nwant %s", out, body)
 		}
@@ -127,7 +133,7 @@ func TestHydrationOverrides_Apply(t *testing.T) {
 func TestHydrationOverrides_ChangeHydratedOutput(t *testing.T) {
 	cfg, payload := bigFileResponse(t, "app/models/big.rb", 500, 240, "app")
 
-	_, ov := takeCallOverrides(toolCall(t, map[string]any{
+	_, ov := takeCallOverrides(renderingProxy, toolCall(t, map[string]any{
 		"query_text":        "x",
 		"max_snippet_lines": 12,
 	}))
@@ -171,7 +177,7 @@ func TestTakeCallOverrides_Format(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			body := toolCall(t, map[string]any{"query_text": "x", "format": tc.sent})
 
-			out, ov := takeCallOverrides(body)
+			out, ov := takeCallOverrides(renderingProxy, body)
 
 			got, _ := unmarshalString(callArguments(t, out)[argFormat])
 			if got != tc.wantOnWire {
@@ -190,7 +196,7 @@ func TestTakeCallOverrides_Format(t *testing.T) {
 func TestTakeCallOverrides_FormatOnGraph(t *testing.T) {
 	body := namedToolCall(t, "GRAPH", map[string]any{"chunk_or_symbol": "X", "format": "agent"})
 
-	out, ov := takeCallOverrides(body)
+	out, ov := takeCallOverrides(renderingProxy, body)
 
 	if got, _ := unmarshalString(callArguments(t, out)[argFormat]); got != formatCompact {
 		t.Errorf("forwarded format %q, want %q", got, formatCompact)
@@ -200,12 +206,35 @@ func TestTakeCallOverrides_FormatOnGraph(t *testing.T) {
 	}
 }
 
+// Who renders `agent` depends on who can do it better.
+//
+// This proxy renders with real paths and bodies, so it takes the rung over and
+// asks the server for the compact JSON its rendering reads. A proxy that cannot
+// enrich has neither to offer — and, crucially, enrichResponse then declines to
+// render at all. Downgrading the request to compact anyway is how a caller who
+// asked for text got compact JSON with no rendering and no explanation, so the
+// argument is forwarded untouched and the server's own rendering answers it.
+func TestTakeCallOverrides_AgentGoesToTheServerWhenTheProxyCannotRender(t *testing.T) {
+	body := toolCall(t, map[string]any{"query_text": "x", "format": "agent"})
+
+	out, ov := takeCallOverrides(Config{}, body)
+
+	if got, _ := unmarshalString(callArguments(t, out)[argFormat]); got != formatAgent {
+		t.Errorf("forwarded format %q, want %q — the server renders this one", got, formatAgent)
+	}
+	// The proxy still records the caller's choice; enrichResponse is a no-op in
+	// this configuration, so nothing downstream acts on it.
+	if ov.apply(Config{}).Format != formatAgent {
+		t.Error("the caller's format choice was lost")
+	}
+}
+
 // The rewrite is keyed to the two tools that declare `format`. Any other tool
 // growing a same-named argument must not be silently rewritten by this proxy.
 func TestTakeCallOverrides_FormatIsRenderedToolsOnly(t *testing.T) {
 	body := namedToolCall(t, "SYNC", map[string]any{"index_id": "X", "format": "agent"})
 
-	out, ov := takeCallOverrides(body)
+	out, ov := takeCallOverrides(renderingProxy, body)
 
 	if got, _ := unmarshalString(callArguments(t, out)[argFormat]); got != "agent" {
 		t.Errorf("SYNC's format was rewritten to %q; it belongs to that tool", got)

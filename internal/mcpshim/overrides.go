@@ -114,14 +114,15 @@ func (o callOverrides) apply(cfg Config) Config {
 
 // takeCallOverrides extracts this call's overrides from a JSON-RPC tools/call
 // body and returns the body to forward: the client-only arguments removed, and
-// format=agent rewritten to the compact JSON the server can actually produce.
+// format=agent rewritten to compact JSON when this proxy is the one that will
+// render it.
 //
 // Returns the ORIGINAL body untouched whenever nothing was found or anything
 // fails to parse. That matters: this runs on every message on the wire,
 // including ones this proxy knows nothing about, and a re-marshal that drops an
 // unrecognised field would break them. Only a body that actually carried an
 // override is rewritten.
-func takeCallOverrides(body []byte) ([]byte, callOverrides) {
+func takeCallOverrides(cfg Config, body []byte) ([]byte, callOverrides) {
 	var msg map[string]json.RawMessage
 	if err := json.Unmarshal(body, &msg); err != nil {
 		return body, callOverrides{}
@@ -167,13 +168,26 @@ func takeCallOverrides(body []byte) ([]byte, callOverrides) {
 				out.format = &value
 				// Unlike the other two, format is a real server argument, so it is
 				// forwarded rather than stripped — verbose, compact and any
-				// unrecognised value all travel untouched. Only the two values the
-				// server has no definition for are rewritten:
+				// unrecognised value all travel untouched. Only values this proxy
+				// answers itself are rewritten:
 				switch value {
 				case formatAgent:
 					// To `compact`, not dropped: agent rendering reads none of the
 					// fields compact omits, so a verbose copy would be paid for on
 					// the server → proxy hop and then discarded.
+					//
+					// Only when this proxy is the one that will render, though. The
+					// server serves this rung too (server/api/agent_render.py), and it
+					// is what answers when enrichment is impossible. Without the
+					// guard, a caller with no unmasker and no scheme knowledge asked
+					// for `agent`, the request was downgraded to compact here,
+					// enrichResponse then declined to render — and the answer came
+					// back as compact JSON with no rendering and nothing saying why.
+					// The proxy takes the rung over only where it can do better: real
+					// paths, and bodies.
+					if !cfg.canEnrich() {
+						break
+					}
 					args[argFormat], _ = json.Marshal(formatCompact)
 					stripped = true
 				case formatJSON:

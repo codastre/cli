@@ -566,14 +566,16 @@ func firstResult(t *testing.T, out []byte) map[string]json.RawMessage {
 	return results[0]
 }
 
-// The saving §4 of the implementation report identified and then declined: an
-// MCP tool result carries the payload twice, and in agent format only one of the
-// two copies needs to be the answer.
+// An MCP tool result carries its payload twice — content[0].text and
+// structuredContent — and in agent format both carry the rendering.
 //
-// The trade is deliberate and asymmetric — a structuredContent-only client loses
-// the results — which is why it applies to `format: "agent"` alone, an explicit
-// request for a text rendering, and never to the JSON default.
-func TestEnrichResponse_QueryAgentFormatSummarisesStructuredContent(t *testing.T) {
+// That duplication was briefly cut to a summary plus a `rendering_in` pointer,
+// and the cut is what this test now guards against returning: measured against a
+// client that reads structuredContent and ignores the content block, a live
+// agent-format QUERY delivered `{"format":"agent","result_count":3,...}` and no
+// results at all. Whichever representation is left holding a pointer, some
+// client reads only that one.
+func TestEnrichResponse_QueryAgentFormatRendersIntoBothRepresentations(t *testing.T) {
 	const repoID = "reviewfy-uuid"
 	cfg := Config{
 		Format:     formatAgent,
@@ -630,20 +632,21 @@ func TestEnrichResponse_QueryAgentFormatSummarisesStructuredContent(t *testing.T
 		t.Errorf("content block is not the rendering:\n%s", text)
 	}
 
-	// The point of the change: the result is one copy of the answer plus a
-	// fixed-size summary, not two copies. Bounded absolutely rather than as a
-	// fraction of the rendering — the summary does not scale with the payload,
-	// which is the property, and on a one-hit fixture it is legitimately a large
-	// fraction of a very small rendering.
-	if got := len(result["structuredContent"]); got > 256 {
-		t.Errorf("structuredContent is %d B — a summary, not the payload again", got)
+	// The property under test: the answer is reachable from either
+	// representation, so no client class silently gets a count and nothing else.
+	if structured.Rendering != text {
+		t.Errorf("structuredContent.rendering differs from the content block:\n%q\nvs\n%q",
+			structured.Rendering, text)
+	}
+	if !strings.Contains(structured.Rendering, "app/jobs/weekly_leaderboard_job.py") {
+		t.Errorf("structuredContent carries no rendering:\n%s", structured.Rendering)
 	}
 }
 
-// The property the byte bound above is a proxy for: the summary is fixed-size.
-// A hundredfold larger response must not make it meaningfully larger, or the
-// duplication has crept back in proportional form.
-func TestAgentSummary_DoesNotScaleWithThePayload(t *testing.T) {
+// The rendering is the only part of the structured half that may scale with the
+// response. Everything wrapped around it is fixed-size, so switching formats
+// cannot reintroduce per-result overhead through the back door.
+func TestAgentSummary_OverheadDoesNotScaleWithThePayload(t *testing.T) {
 	build := func(n int) []byte {
 		results := make([]map[string]any, n)
 		for i := range results {
@@ -655,10 +658,19 @@ func TestAgentSummary_DoesNotScaleWithThePayload(t *testing.T) {
 		b, _ := json.Marshal(map[string]any{"status": "ok", "freshness": "fresh", "results": results})
 		return b
 	}
+	overhead := func(n int) int {
+		payload := build(n)
+		rendering, ok := renderQueryText(payload, RenderOptions{NoSnippets: true})
+		if !ok {
+			t.Fatalf("render %d-hit payload", n)
+		}
+		b, _ := json.Marshal(agentSummary(payload, rendering))
+		// JSON-escaping the rendering costs a byte per newline, which is the
+		// rendering's own cost, not the wrapper's.
+		return len(b) - len(rendering) - strings.Count(rendering, "\n")
+	}
 
-	small, _ := json.Marshal(agentSummary(build(1)))
-	large, _ := json.Marshal(agentSummary(build(50)))
-	if delta := len(large) - len(small); delta > 8 {
-		t.Errorf("summary grew %d B between a 1-hit and a 50-hit payload; it must not scale", delta)
+	if delta := overhead(50) - overhead(1); delta > 8 {
+		t.Errorf("wrapper grew %d B between a 1-hit and a 50-hit payload; it must not scale", delta)
 	}
 }

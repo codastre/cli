@@ -308,8 +308,8 @@ func TestEnrichResponse_GraphAgentFormat(t *testing.T) {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
-	// structuredContent is a summary, not a second copy of the rendering: the
-	// duplication is what agent format exists to stop paying for.
+	// structuredContent carries the rendering, wrapped with the fields a program
+	// branches on — a client that reads only this half must still get the answer.
 	var structured AgentSummary
 	if err := json.Unmarshal(result["structuredContent"], &structured); err != nil {
 		t.Fatalf("unmarshal structuredContent: %v", err)
@@ -325,11 +325,8 @@ func TestEnrichResponse_GraphAgentFormat(t *testing.T) {
 	if structured.ResultCount != nil {
 		t.Errorf("result_count = %v on a GRAPH summary, want absent", *structured.ResultCount)
 	}
-	if structured.RenderingIn != "content[0].text" {
-		t.Errorf("rendering_in = %q, want content[0].text", structured.RenderingIn)
-	}
-	if n := len(result["structuredContent"]); n > 200 {
-		t.Errorf("structuredContent is %d B — a summary, not the payload again", n)
+	if !strings.Contains(structured.Rendering, "internal/pay/card.go") {
+		t.Errorf("structuredContent carries no rendering:\n%s", structured.Rendering)
 	}
 
 	var content []map[string]json.RawMessage

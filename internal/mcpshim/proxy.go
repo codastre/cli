@@ -164,7 +164,7 @@ func Run(cfg Config, in io.Reader, out io.Writer) error {
 		// Client-only hydration arguments are consumed here and stripped from
 		// the request: they have no server-side counterpart and would fail the
 		// QUERY tool's schema validation. See overrides.go.
-		line, ov := takeCallOverrides(line)
+		line, ov := takeCallOverrides(cfg, line)
 		resp, err := forwardMessage(cfg, line)
 		if err != nil {
 			resp = errorEnvelope(line, err)
@@ -253,12 +253,11 @@ func enrichResponse(cfg Config, data []byte) []byte {
 	}
 	if rendering != "" {
 		// Agent format: the rendering goes in the content block, and
-		// structuredContent carries a summary rather than a second copy of it.
-		// QUERY declares an outputSchema, so a spec-strict client is entitled to
-		// structuredContent — but it is an open object, so what it is entitled to
-		// is an object, not the answer twice. See AgentSummary in render.go for
-		// the trade this makes and who loses it.
-		result["structuredContent"], _ = json.Marshal(agentSummary(enriched))
+		// structuredContent carries it too, wrapped with the fields a program
+		// branches on. Both, because a client reads one or the other and there is
+		// no way to know which — see AgentSummary in render.go for the measured
+		// case where putting it in only one silently returned nothing.
+		result["structuredContent"], _ = json.Marshal(agentSummary(enriched, rendering))
 		setContentText(result, []byte(rendering))
 	} else {
 		result["structuredContent"] = enriched

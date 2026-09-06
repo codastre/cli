@@ -167,7 +167,11 @@ func extendFormatEnum(props map[string]json.RawMessage, note, standalone string)
 		return false
 	}
 	if slices.Contains(values, formatAgent) {
-		return false // already advertised (a future server, or a re-annotation)
+		// The server publishes the rung itself (it renders agent format too, for
+		// callers that reach /mcp without this proxy), or the schema has already
+		// been annotated once. Either way its own description is the accurate
+		// one — this proxy's note would only claim the value is proxy-only.
+		return false
 	}
 	prop["enum"], _ = json.Marshal(append(values, formatAgent))
 
