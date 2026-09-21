@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/codastre/cli/internal/clientheader"
 	"github.com/codastre/cli/internal/keychain"
 	"github.com/spf13/cobra"
 )
@@ -76,6 +77,7 @@ func revokeServerKey(serverURL, apiKey string) error {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("X-Codastre-Client", clientheader.Value())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
@@ -98,6 +100,7 @@ func revokeServerKey(serverURL, apiKey string) error {
 		return err
 	}
 	delReq.Header.Set("Authorization", "Bearer "+apiKey)
+	delReq.Header.Set("X-Codastre-Client", clientheader.Value())
 	delResp, err := http.DefaultClient.Do(delReq)
 	if err != nil {
 		return err

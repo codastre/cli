@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/codastre/cli/internal/clientheader"
 )
 
 // serverDiscovery is the public, unauthenticated configuration the server
@@ -28,6 +30,7 @@ func discover(ctx context.Context, serverURL string) *serverDiscovery {
 	if err != nil {
 		return nil
 	}
+	req.Header.Set("X-Codastre-Client", clientheader.Value())
 	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
 	if err != nil {
 		return nil

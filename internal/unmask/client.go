@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/codastre/cli/internal/clientheader"
 )
 
 // RepoInfo is the subset of GET /v1/repos a client needs to set up unmasking.
@@ -179,6 +181,7 @@ func getRaw(u, apiKey string) ([]byte, int, error) {
 		return nil, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("X-Codastre-Client", clientheader.Value())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, 0, err

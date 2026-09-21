@@ -19,6 +19,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/codastre/cli/internal/clientheader"
 )
 
 // Config configures a one-shot tool call.
@@ -92,6 +94,7 @@ func Call(ctx context.Context, cfg Config, tool string, args map[string]any) (js
 	// the server is configured for JSON responses.
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+	req.Header.Set("X-Codastre-Client", clientheader.Value())
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

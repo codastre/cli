@@ -14,6 +14,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/codastre/cli/internal/clientheader"
 )
 
 // Config configures the MCP proxy.
@@ -156,16 +158,28 @@ func (cfg Config) rootFor(repoID string) string {
 func Run(cfg Config, in io.Reader, out io.Writer) error {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	// Set once the agent's own `initialize` clientInfo is seen (§8c below) —
+	// empty until then, and forever when the agent sends none.
+	sniffedClient := ""
 	for sc.Scan() {
 		line := sc.Bytes()
 		if len(line) == 0 {
 			continue
 		}
+		// Sniff the real originator behind this shim (client-attribution-plan.md
+		// §8c) before anything else touches the line — read-only, forwarded
+		// unchanged either way. Once seen, a session can't change identity, so
+		// stop checking.
+		if sniffedClient == "" {
+			if h, ok := initializeClientHeader(line); ok {
+				sniffedClient = h
+			}
+		}
 		// Client-only hydration arguments are consumed here and stripped from
 		// the request: they have no server-side counterpart and would fail the
 		// QUERY tool's schema validation. See overrides.go.
 		line, ov := takeCallOverrides(cfg, line)
-		resp, err := forwardMessage(cfg, line)
+		resp, err := forwardMessage(cfg, line, clientHeaderFor(sniffedClient))
 		if err != nil {
 			resp = errorEnvelope(line, err)
 		} else {
@@ -186,7 +200,46 @@ func Run(cfg Config, in io.Reader, out io.Writer) error {
 	return sc.Err()
 }
 
-func forwardMessage(cfg Config, body []byte) ([]byte, error) {
+// initializeClientHeader extracts an X-Codastre-Client value from an MCP
+// `initialize` request's params.clientInfo — the real originator behind this
+// shim, e.g. an agent harness (client-attribution-plan.md §8c: a plugin call
+// then arrives as "claude-code/2.x" rather than the bare CLI fallback). ok is
+// false for any other method, a malformed body, or an empty clientInfo.name.
+func initializeClientHeader(line []byte) (string, bool) {
+	var msg struct {
+		Method string `json:"method"`
+		Params struct {
+			ClientInfo struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			} `json:"clientInfo"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(line, &msg); err != nil || msg.Method != "initialize" {
+		return "", false
+	}
+	if msg.Params.ClientInfo.Name == "" {
+		return "", false
+	}
+	return msg.Params.ClientInfo.Name + "/" + msg.Params.ClientInfo.Version, true
+}
+
+// clientHeaderFor resolves X-Codastre-Client for one forwarded message, per
+// the plan's precedence: an explicit --client/$CODASTRE_CLIENT override
+// (clientheader.Override) always wins; otherwise the sniffed agent clientInfo
+// once seen; otherwise this binary's own "codastre-cli/<version>" default
+// (clientheader.Value, which falls back to exactly that when no override is set).
+func clientHeaderFor(sniffed string) string {
+	if o := clientheader.Override(); o != "" {
+		return o
+	}
+	if sniffed != "" {
+		return sniffed
+	}
+	return clientheader.Value()
+}
+
+func forwardMessage(cfg Config, body []byte, clientHeader string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodPost, cfg.ServerURL+"/mcp", strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
@@ -198,6 +251,7 @@ func forwardMessage(cfg Config, body []byte) ([]byte, error) {
 	// surfaces to the agent as a -32000 "failed to connect" error.
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+	req.Header.Set("X-Codastre-Client", clientHeader)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

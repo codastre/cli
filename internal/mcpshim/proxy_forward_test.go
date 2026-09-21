@@ -40,7 +40,7 @@ func TestForwardMessageSendsAcceptHeader(t *testing.T) {
 	defer srv.Close()
 
 	cfg := Config{ServerURL: srv.URL, APIKey: "test-key"}
-	resp, err := forwardMessage(cfg, []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
+	resp, err := forwardMessage(cfg, []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`), "codastre-cli/test")
 	if err != nil {
 		t.Fatalf("forwardMessage returned error (Accept header missing?): %v", err)
 	}

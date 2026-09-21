@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/codastre/cli/internal/checkouts"
+	"github.com/codastre/cli/internal/clientheader"
 	"github.com/codastre/cli/internal/git"
 	"github.com/codastre/cli/internal/keychain"
 	"github.com/spf13/cobra"
@@ -224,6 +225,7 @@ func checkAuth(serverURL, apiKey string) (bool, string) {
 		return false, err.Error()
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("X-Codastre-Client", clientheader.Value())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return false, err.Error()
@@ -244,6 +246,7 @@ func checkGitHubApp(serverURL, apiKey string) (configured bool, ok bool) {
 		return false, false
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("X-Codastre-Client", clientheader.Value())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return false, false
@@ -271,6 +274,7 @@ func checkLanguages(serverURL, apiKey string) (enabledLanguages []string, ok boo
 		return nil, false
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("X-Codastre-Client", clientheader.Value())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, false
