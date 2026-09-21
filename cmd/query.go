@@ -65,7 +65,9 @@ Examples:
   codastre query "consumers lagging" --content-kinds runbook            # find the runbook
   codastre query "page fired" --alert-ids KAFKA-1024 --content-kinds runbook  # exact alert lookup
   codastre query "parse config" --language go --format agent  # compact text for agents
-  codastre query "recall service" --snippets                  # print the bodies too`,
+  codastre query "recall service" --snippets                  # print the bodies too
+  codastre query "payment webhook" --all --stacks backend     # only backend repos
+  codastre query "push token refresh" --all --stacks android  # Android repos only`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runQuery,
@@ -82,6 +84,7 @@ var (
 	queryLanguage        string
 	queryPathPrefix      string
 	queryContentKinds    []string
+	queryStacks          []string
 	queryAlertIDs        []string
 	queryErrorCodes      []string
 	queryJSON            bool
@@ -110,6 +113,11 @@ func init() {
 	f.StringVar(&queryLanguage, "language", "", "Filter by language")
 	f.StringVar(&queryPathPrefix, "path-prefix", "", "Filter by path prefix")
 	f.StringSliceVar(&queryContentKinds, "content-kinds", nil, "Filter by content kinds (repeatable)")
+	f.StringSliceVar(&queryStacks, "stacks", nil,
+		"Search only repos in these technical stacks, e.g. backend or mobile "+
+			"(repeatable). A parent covers its children: 'mobile' matches shared, "+
+			"Android and iOS repos, while 'android'/'ios' match only that platform. "+
+			"Unassigned repos match no stack filter")
 	f.StringSliceVar(&queryAlertIDs, "alert-ids", nil, "Exact-match runbooks carrying these alert ids, e.g. KAFKA-1024 (repeatable)")
 	f.StringSliceVar(&queryErrorCodes, "error-codes", nil, "Exact-match runbooks carrying these error codes, e.g. ERR_CONSUMER_LAG (repeatable)")
 	f.BoolVar(&queryJSON, "json", false, "Emit the raw JSON envelope instead of human output")
@@ -167,6 +175,46 @@ func corporaFlagConflicts(changed func(string) bool) (errs []string, warns []str
 	return errs, warns
 }
 
+// queryToolArgs builds the QUERY tool payload from the parsed flags.
+//
+// Extracted from runQuery so the wire names are testable without a server: an
+// unset filter must serialise to NO key at all, because an empty list on the
+// wire is a filter the server would apply. That is the back-compat contract for
+// every command that predates a flag.
+func queryToolArgs(text, format string) map[string]any {
+	toolArgs := map[string]any{"query_text": text, "top_k": queryTopK}
+	if queryRef != "" {
+		toolArgs["ref"] = queryRef
+	}
+	if queryLanguage != "" {
+		toolArgs["language"] = queryLanguage
+	}
+	if queryPathPrefix != "" {
+		toolArgs["path_prefix"] = queryPathPrefix
+	}
+	if len(queryContentKinds) > 0 {
+		toolArgs["content_kinds"] = queryContentKinds
+	}
+	// Wire name is "stacks", not the flag's singular and not a query-text
+	// prefix: one name across CLI, MCP and REST is what keeps the three from
+	// drifting. Aliases (android/ios) are passed through verbatim — the server
+	// owns normalization, so the CLI cannot disagree with it about what
+	// "android" means.
+	if len(queryStacks) > 0 {
+		toolArgs["stacks"] = queryStacks
+	}
+	if len(queryAlertIDs) > 0 {
+		toolArgs["alert_ids"] = queryAlertIDs
+	}
+	if len(queryErrorCodes) > 0 {
+		toolArgs["error_codes"] = queryErrorCodes
+	}
+	if wire, ok := wireFormatFor(format); ok {
+		toolArgs["format"] = wire
+	}
+	return toolArgs
+}
+
 func runQuery(cmd *cobra.Command, args []string) error {
 	if queryCorpora {
 		// Flags that do not exist on the corpus path are rejected or reported,
@@ -190,6 +238,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		// the flag it looks like rather than as a differently-configured command.
 		corporaServerURL, corporaKey = queryServerURL, queryKey
 		corporaLanguage, corporaContentKinds = queryLanguage, queryContentKinds
+		corporaStacks = queryStacks
 		corporaJSON, corporaFormat = queryJSON, queryFormat
 		corporaNoUnmask, corporaRepoPath = queryNoUnmask, queryRepoPath
 		// query's --top-k default is 6, tuned for chunk bodies; a corpus list is
@@ -219,28 +268,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+warn)
 	}
 
-	toolArgs := map[string]any{"query_text": args[0], "top_k": queryTopK}
-	if queryRef != "" {
-		toolArgs["ref"] = queryRef
-	}
-	if queryLanguage != "" {
-		toolArgs["language"] = queryLanguage
-	}
-	if queryPathPrefix != "" {
-		toolArgs["path_prefix"] = queryPathPrefix
-	}
-	if len(queryContentKinds) > 0 {
-		toolArgs["content_kinds"] = queryContentKinds
-	}
-	if len(queryAlertIDs) > 0 {
-		toolArgs["alert_ids"] = queryAlertIDs
-	}
-	if len(queryErrorCodes) > 0 {
-		toolArgs["error_codes"] = queryErrorCodes
-	}
-	if wire, ok := wireFormatFor(format); ok {
-		toolArgs["format"] = wire
-	}
+	toolArgs := queryToolArgs(args[0], format)
 
 	// Server caps QUERY at 10s; allow margin for transport.
 	ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)

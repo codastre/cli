@@ -51,7 +51,8 @@ Always federated: it ranks across everything you can see, which is the point.
 Examples:
   codastre corpora "customers report their virtual card was declined at checkout"
   codastre corpora "public api documentation"
-  codastre corpora "$(gh issue view 4213 --json body -q .body)"`,
+  codastre corpora "$(gh issue view 4213 --json body -q .body)"
+  codastre corpora "payment webhook" --stacks backend,mobile`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runCorpora,
@@ -63,6 +64,7 @@ var (
 	corporaTopK         int
 	corporaLanguage     string
 	corporaContentKinds []string
+	corporaStacks       []string
 	corporaJSON         bool
 	corporaFormat       string
 	corporaNoUnmask     bool
@@ -80,11 +82,32 @@ func init() {
 	f.IntVar(&corporaTopK, "top-k", 10, "Maximum corpora to return (1-50)")
 	f.StringVar(&corporaLanguage, "language", "", "Only draw evidence from this language")
 	f.StringSliceVar(&corporaContentKinds, "content-kinds", nil, "Only draw evidence from these content kinds (repeatable)")
+	f.StringSliceVar(&corporaStacks, "stacks", nil,
+		"Only rank repos in these technical stacks, e.g. backend or mobile "+
+			"(repeatable). A parent covers its children; 'android'/'ios' match "+
+			"only that platform")
 	f.BoolVar(&corporaJSON, "json", false, "Emit the raw JSON envelope instead of human output")
 	f.StringVar(&corporaFormat, "format", "human", "Output format: human | json | agent (compact text for agents)")
 	f.BoolVar(&corporaNoUnmask, "no-unmask", false, "Show raw masked path_tokens in the evidence list")
 	f.StringVar(&corporaRepoPath, "repo-path", "", "Local checkout to unmask evidence paths against")
 	rootCmd.AddCommand(corporaCmd)
+}
+
+// corporaToolArgs builds the CORPUS_SEARCH payload from the parsed flags.
+// Extracted for the same reason as queryToolArgs: an unset filter must serialise
+// to no key at all.
+func corporaToolArgs(text string) map[string]any {
+	toolArgs := map[string]any{"query_text": text, "top_k": corporaTopK}
+	if corporaLanguage != "" {
+		toolArgs["language"] = corporaLanguage
+	}
+	if len(corporaContentKinds) > 0 {
+		toolArgs["content_kinds"] = corporaContentKinds
+	}
+	if len(corporaStacks) > 0 {
+		toolArgs["stacks"] = corporaStacks
+	}
+	return toolArgs
 }
 
 func runCorpora(cmd *cobra.Command, args []string) error {
@@ -101,13 +124,7 @@ func runCorpora(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+warn)
 	}
 
-	toolArgs := map[string]any{"query_text": args[0], "top_k": corporaTopK}
-	if corporaLanguage != "" {
-		toolArgs["language"] = corporaLanguage
-	}
-	if len(corporaContentKinds) > 0 {
-		toolArgs["content_kinds"] = corporaContentKinds
-	}
+	toolArgs := corporaToolArgs(args[0])
 
 	// Corpus ranking fans out deeper than chunk QUERY, but the server's 10 s
 	// hard cap covers it too — same margin for transport as query.
