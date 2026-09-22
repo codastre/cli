@@ -6,7 +6,10 @@
 // (dependency rule — CLAUDE.md's hexagonal-architecture section).
 package buildinfo
 
-import "runtime/debug"
+import (
+	"runtime/debug"
+	"strings"
+)
 
 // Injected at release time via the linker (-ldflags -X — see .goreleaser.yaml).
 // GoReleaser overwrites these for tagged releases. When they keep their
@@ -31,7 +34,7 @@ func Resolve() (string, string, string) {
 // explicitly so it can be unit-tested without rebuilding the binary.
 func computeBuildInfo(v, c, d string, bi *debug.BuildInfo) (string, string, string) {
 	if bi == nil {
-		return v, c, d
+		return normalizeVersion(v), c, d
 	}
 
 	// Prefer the module version recorded by `go install …@version` (empty or
@@ -63,10 +66,24 @@ func computeBuildInfo(v, c, d string, bi *debug.BuildInfo) (string, string, stri
 	if v == "dev" && c != "none" {
 		v = shortCommit(c)
 	}
+	v = normalizeVersion(v)
 	if dirty && v != "dev" {
 		v += "-dirty"
 	}
 	return v, c, d
+}
+
+// normalizeVersion strips a leading "v" so every distribution channel reports
+// the same string. GoReleaser injects a bare SemVer (`{{ .Version }}`, and
+// release.yml's verify step asserts `codastre ${TAG#v}`), while
+// `go install …@latest` records a "v"-prefixed module version. Left unnormalized,
+// one release lands in the audit log as two client cohorts — "codastre-cli/0.19.1"
+// and "codastre-cli/v0.19.1" — splitting the dashboard's client mix.
+//
+// Safe for the non-SemVer fallbacks: "dev" and a hex short commit never start
+// with "v".
+func normalizeVersion(v string) string {
+	return strings.TrimPrefix(v, "v")
 }
 
 func shortCommit(c string) string {
