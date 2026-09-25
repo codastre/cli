@@ -126,7 +126,7 @@ codastre graph PaymentService.charge --kind calls --depth 2
 | `codastre graph <symbol>` | Traverse the cross-repo relationship graph from a symbol or chunk |
 | `codastre masking-key` | Copy a repo's HMAC masking key to the clipboard (hex) |
 | `codastre collect` | Parse local Claude Code transcripts into usage counters (local only) |
-| `codastre savings` | Summarise your own search-tool usage — transcripts or the local log |
+| `codastre savings` | Summarise your own search-tool usage — transcripts, the local log, or the server |
 | `codastre dashboard` | Open the web dashboard in an already-authenticated session |
 | `codastre doctor` | Run diagnostics — exit `0` = all pass, `1` = error, `2` = warnings only |
 | `codastre logout` | Revoke the stored API key server-side and remove it from the keychain |
@@ -140,6 +140,7 @@ Run `codastre <command> --help` for flags and details.
 codastre collect              # parse the transcripts already on this machine
 codastre savings              # last 30 days
 codastre savings --window 7d
+codastre savings --source server   # your own rows from the control plane
 codastre savings --window all --json
 ```
 
@@ -153,8 +154,14 @@ Two sources, reported one at a time and **never summed**:
   Cursor, Codex and other MCP clients. Written when `CODASTRE_TRACK_TOKENS=1` or
   while a live A/B mode is on.
 
+- **the server** (`--source server`) — `GET /v1/me/usage`, the control plane's count
+  of your own calls (calls, envelope tokens, repos touched ≥2), printed with the
+  server's own receipt verbatim so the CLI and the dashboard cannot explain the same
+  number two different ways. Opt-in: it is the only source that makes a network call.
+
 `--source auto` (the default) prefers the transcript when a collection exists and
-falls back to the log; `--source transcript|log` pins it.
+falls back to the log, and never calls the server; `--source transcript|log|server`
+pins it.
 
 ```
 Sessions
@@ -176,9 +183,10 @@ Search episodes (one per turn)
 Both failure rows and the denominator are always shown: a rate that hides its
 denominator reads as marketing.
 
-Three things these commands deliberately do not do. **Nothing leaves the machine** —
-no server call, no upload, no opt-in, and the parse of a transcript keeps counts,
-byte totals and timestamps only. Prompts, code, paths and tool output are never
+Three things these commands deliberately do not do. **Nothing leaves the machine**
+unless you ask — the local sources make no server call and no upload, `--source
+server` only *reads back* rows the server already had, and the parse of a
+transcript keeps counts, byte totals and timestamps only. Prompts, code, paths and tool output are never
 stored or printed, which tests assert directly. **No savings figure** is reported:
 there is no observable counterfactual for a search that never ran, so none is
 computed. And **sources are never mixed** — exact transcript counts and estimated

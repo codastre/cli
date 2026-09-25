@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,10 +17,11 @@ var savingsCmd = &cobra.Command{
 	Short: "What your search tooling actually cost, from your own local log",
 	Long: `Summarise your own search-tool usage from the local plugin log.
 
-Everything here is read from ~/.config/codastre/claude-token-log.jsonl
+By default everything here is read from ~/.config/codastre/claude-token-log.jsonl
 ($CODASTRE_TOKEN_LOG overrides), written by the Claude Code plugin hook when
 CODASTRE_TRACK_TOKENS=1 or a live A/B mode is active. No server call, no
-upload, no opt-in — the number is yours before it is anyone else's.
+upload, no opt-in — the number is yours before it is anyone else's. Only the
+explicit --source server reads your own counters back from the control plane.
 
 What it reports:
   • result tokens and call counts per class — codastre (MCP and CLI planes
@@ -32,9 +34,17 @@ counterfactual for a search that never ran, so none is computed, stored or
 printed. Token figures are byte-ratio estimates (±20%), exclude reasoning
 tokens, and are not billing-grade.
 
+Sources, reported one at a time and never summed:
+  • transcript — collected Claude Code sessions (exact), via 'codastre collect'
+  • log        — the local plugin JSONL log (±20% estimates)
+  • server     — GET /v1/me/usage: the control plane's count of your own calls,
+                 rendered with the server's own receipt. Opt-in: '--source auto'
+                 never calls the server.
+
 Examples:
   codastre savings
   codastre savings --window 7d
+  codastre savings --source server --window 30d
   codastre savings --window all --json`,
 	Args:         cobra.NoArgs,
 	SilenceUsage: true,
@@ -42,10 +52,12 @@ Examples:
 }
 
 var (
-	savingsWindow  string
-	savingsJSON    bool
-	savingsLogPath string
-	savingsSource  string
+	savingsWindow    string
+	savingsJSON      bool
+	savingsLogPath   string
+	savingsSource    string
+	savingsServerURL string
+	savingsKey       string
 )
 
 func init() {
@@ -53,7 +65,9 @@ func init() {
 	f.StringVar(&savingsWindow, "window", "30d", "Window to summarise: 7d | 30d | all | <N>d")
 	f.BoolVar(&savingsJSON, "json", false, "Emit the summary as JSON")
 	f.StringVar(&savingsLogPath, "log", "", "Path to the token log [$CODASTRE_TOKEN_LOG]")
-	f.StringVar(&savingsSource, "source", "auto", "Which source to report: auto | transcript | log")
+	f.StringVar(&savingsSource, "source", "auto", "Which source to report: auto | transcript | log | server")
+	f.StringVar(&savingsServerURL, "server", defaultServerURL(), "Server URL, for --source server [$CODASTRE_SERVER]")
+	f.StringVar(&savingsKey, "key", "", "API key (overrides $CODASTRE_API_KEY and keychain)")
 	rootCmd.AddCommand(savingsCmd)
 }
 
@@ -65,8 +79,12 @@ func runSavings(cmd *cobra.Command, _ []string) error {
 
 	switch savingsSource {
 	case "auto", "transcript", "log":
+	case "server":
+		// Opt-in and exclusive: server counters answer a different question
+		// from the local sources and are never added to them.
+		return savingsFromServer(cmd, window)
 	default:
-		return fmt.Errorf("invalid --source %q: use auto, transcript, or log", savingsSource)
+		return fmt.Errorf("invalid --source %q: use auto, transcript, log, or server", savingsSource)
 	}
 	if savingsSource != "log" {
 		done, err := savingsFromTranscript(cmd, window, since)
@@ -103,6 +121,34 @@ func runSavings(cmd *cobra.Command, _ []string) error {
 		return enc.Encode(summary)
 	}
 	usage.Render(cmd.OutOrStdout(), summary)
+	return nil
+}
+
+// savingsFromServer reports the control plane's own counters for the caller's
+// rows (GET /v1/me/usage). It is reached only via an explicit --source server:
+// local and server sources are alternatives, never addends.
+func savingsFromServer(cmd *cobra.Command, window string) error {
+	apiKey, warn, err := resolveAPIKey(savingsServerURL, savingsKey)
+	if err != nil {
+		return err
+	}
+	if warn != "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+warn)
+	}
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
+	defer cancel()
+
+	summary, err := usage.FetchServer(ctx, savingsServerURL, apiKey, window)
+	if err != nil {
+		return err
+	}
+	if savingsJSON {
+		// Pass the server payload through untouched: fields this CLI does not
+		// know about still reach the caller.
+		return printJSON(cmd.OutOrStdout(), summary.Raw)
+	}
+	usage.RenderServer(cmd.OutOrStdout(), savingsServerURL, summary)
 	return nil
 }
 

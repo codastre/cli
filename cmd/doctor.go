@@ -399,6 +399,9 @@ func usageTrackingDetail() string {
 	} else {
 		parts = append(parts, "no transcripts collected — run `codastre collect`")
 	}
+	// Named last because it is the one source that leaves the machine, and
+	// only on an explicit flag.
+	parts = append(parts, "server counters on request (`codastre savings --source server`)")
 	return strings.Join(parts, "; ")
 }
 
