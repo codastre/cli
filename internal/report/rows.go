@@ -86,6 +86,17 @@ type SessionRow struct {
 	CompactionsManual   int                `json:"compactions_manual"`
 	ToolMix             map[string]ToolUse `json:"tool_mix"`
 	ClientVersion       *string            `json:"client_version"`
+	// Study tags a session claimed for a Plane 4 assignment. Omitted, not
+	// null, when absent, so an untagged row is byte-identical to M3's and a
+	// server predating studies never sees the key. The arm is not here: the
+	// server takes it from the assignment, never from the client.
+	Study *StudyRef `json:"study,omitempty"`
+}
+
+// StudyRef is the study block on a session row: two ids, no content.
+type StudyRef struct {
+	AssignmentID string `json:"assignment_id"`
+	PromptSHA256 string `json:"prompt_sha256"`
 }
 
 // SessionRef hashes a raw session id under the per-tenant usage key.

@@ -40,6 +40,11 @@ type State struct {
 	// ReportSince is the consent boundary (D7): set by the first
 	// upload-enabled run, and no session that started earlier is uploaded.
 	ReportSince time.Time `json:"report_since,omitzero"`
+	// StudyLog is the watermark into the study log (study-sessions.jsonl).
+	StudyLog *FileMark `json:"study_log,omitempty"`
+	// Study is keyed by raw session id: the Plane 4 assignment a session was
+	// claimed for. Beside Sessions for the same reason as Compactions.
+	Study map[string]*StudyTag `json:"study,omitempty"`
 }
 
 // StatePath is where the collection lives: the same config root as the
@@ -64,6 +69,7 @@ func LoadState(path string) *State {
 		Files:       map[string]*FileMark{},
 		Sessions:    map[string]*Session{},
 		Compactions: map[string]*Compactions{},
+		Study:       map[string]*StudyTag{},
 	}
 	if path == "" {
 		return empty
@@ -84,6 +90,9 @@ func LoadState(path string) *State {
 	}
 	if s.Compactions == nil {
 		s.Compactions = map[string]*Compactions{}
+	}
+	if s.Study == nil {
+		s.Study = map[string]*StudyTag{}
 	}
 	return &s
 }

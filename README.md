@@ -127,6 +127,7 @@ codastre graph PaymentService.charge --kind calls --depth 2
 | `codastre masking-key` | Copy a repo's HMAC masking key to the clipboard (hex) |
 | `codastre collect` | Parse local Claude Code transcripts into usage counters (local; `--upload` is opt-in) |
 | `codastre savings` | Summarise your own search-tool usage — transcripts, the local log, or the server |
+| `codastre study` | Take part in (or, as an admin, read and judge) a pre-registered paired study — tool vs no tool |
 | `codastre dashboard` | Open the web dashboard in an already-authenticated session |
 | `codastre doctor` | Run diagnostics — exit `0` = all pass, `1` = error, `2` = warnings only |
 | `codastre logout` | Revoke the stored API key server-side and remove it from the keychain |
@@ -218,6 +219,55 @@ allowlist.
   (`~/.config/codastre/session-events.jsonl`); a transcript does not record them.
 - `codastre savings --source server` then shows your episode outcomes beside your
   call counts — each with its own receipt, never combined.
+- **Study sessions** (below) are reported under their assignment even if they started
+  before the boundary — joining the study was the consent for that session — but still
+  only with the variable and the flag.
+
+### History from before the boundary — `codastre collect --backfill`
+
+```bash
+codastre collect --backfill                        # preview: prints exactly what would be sent
+CODASTRE_USAGE_REPORT=1 codastre collect --backfill --upload   # asks you to type "yes"
+```
+
+On its own `--backfill` sends nothing: it lists each pre-boundary session with the
+counters that would go on the wire (`--json` prints the rows verbatim, with the
+session id shown as `hmac-sha256(<tenant usage key>, <session id>)` — the key is not
+fetched for a preview). With `--upload` it asks for an explicit `yes` on a terminal,
+and refuses off a terminal unless you pass `--yes`. **Per run:** nothing is remembered
+as consent, the boundary does not move, and the next backfill asks again. Backfilled
+rows seed your session history (cost, context amplification, compactions); they never
+join a study pair, because a session that predates a study's registration was not run
+under its pre-registered prompt.
+
+## 🧪 Paired studies — `codastre study`
+
+The strongest measurement codastre has: the same pre-registered task run once with
+the tool and once without, both sessions measured exactly from their transcripts.
+
+```bash
+codastre study list                       # open studies and their tasks (prompt hashes)
+codastre study start auth-q4 --task refresh   # get an arm; writes ~/.config/codastre/study.json
+#   → open a NEW Claude Code session and send any message: the plugin injects the
+#     pre-registered prompt verbatim and enforces the arm (no_tool blocks Codastre on
+#     both the MCP tools and the CLI)
+CODASTRE_USAGE_REPORT=1 codastre collect --upload   # reports the session, tagged
+codastre study status                     # assignment id (label your diff with it)
+codastre study stop                       # end the run; your own search mode is back
+```
+
+The server assigns the arm and balances arm order; the client never states its own
+arm, only the assignment id and the hash of the prompt it ran. Admins read and judge:
+
+```bash
+codastre study show auth-q4               # pairs as rows, n vs target, balance, receipt
+codastre study judge auth-q4              # blind queue: acceptance criteria, no arm
+codastre study verdict auth-q4 <assignment-id> correct|incorrect
+```
+
+`show` never averages: it prints each pair, and the headline — counts of pairs where
+each arm was correct, cheaper, faster — appears only once the pre-registered number of
+complete, judged pairs exists. Until then it prints why it is withheld.
 
 ## 🔒 Privacy by design
 
@@ -250,6 +300,8 @@ dashboard's security-posture view is explicit about exactly where the guarantee 
 | `CODASTRE_COLLECT_STATE` | Collected-counter state file (default `~/.config/codastre/collect-state.json`) |
 | `CODASTRE_SESSION_EVENTS_LOG` | Hook event log read by `codastre collect` (default `~/.config/codastre/session-events.jsonl`) |
 | `CODASTRE_USAGE_REPORT` | Set to `1` to allow `codastre collect --upload` to send counters to the server |
+| `CODASTRE_STUDY_FILE` | Active study run written by `codastre study start` (default `~/.config/codastre/study.json`) |
+| `CODASTRE_STUDY_LOG` | Study claims written by the plugin hook, read by `codastre collect` (default `~/.config/codastre/study-sessions.jsonl`) |
 
 ## 🔗 Learn more
 

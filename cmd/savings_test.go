@@ -166,6 +166,7 @@ func execRoot(t *testing.T, args ...string) (string, error) {
 		savingsWindow, savingsJSON, savingsLogPath, savingsSource = "30d", false, "", "auto"
 		collectLimit, collectJSON, collectRoot, collectReset = 0, false, "", false
 		collectUpload, collectServerURL, collectKey = false, defaultServerURL(), ""
+		collectBackfill, collectYes = false, false
 	})
 	rootCmd.SetArgs(args)
 	err := rootCmd.Execute()

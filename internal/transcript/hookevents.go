@@ -42,58 +42,70 @@ type HookResult struct {
 }
 
 // CollectHookEvents folds new hook-log lines into state.Compactions, resuming
-// from state.HookLog. When the log was rotated (new inode) the remainder of
-// the rotated `.1` file is read first, so events written between the last run
-// and the rotation are not lost. A missing log is not an error: most machines
-// have no hook installed.
+// from state.HookLog. A missing log is not an error: most machines have no
+// hook installed.
 func CollectHookEvents(path string, state *State) (HookResult, error) {
-	var res HookResult
+	if state.Compactions == nil {
+		state.Compactions = map[string]*Compactions{}
+	}
+	n, c, err := collectLog(path, &state.HookLog, func(line []byte) bool {
+		return applyHookLine(line, state)
+	})
+	return HookResult{BytesRead: n, Compactions: c}, err
+}
+
+// collectLog reads the complete lines appended to an append-only JSONL log
+// since *markp, applying each, and advances the mark. When the log was
+// rotated (new inode) the remainder of the rotated `.1` file is read first,
+// so lines written between the last run and the rotation are not lost. It
+// returns the bytes committed and how many lines apply accepted. A missing
+// log is not an error.
+func collectLog(path string, markp **FileMark, apply func([]byte) bool) (int64, int, error) {
 	if path == "" {
-		return res, nil
+		return 0, 0, nil
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return res, nil
+			return 0, 0, nil
 		}
-		return res, err
+		return 0, 0, err
 	}
-	if state.Compactions == nil {
-		state.Compactions = map[string]*Compactions{}
-	}
-	mark := state.HookLog
+	mark := *markp
 	if mark == nil {
 		mark = &FileMark{}
-		state.HookLog = mark
+		*markp = mark
 	}
+	var total int64
+	accepted := 0
 	inode := inodeOf(info)
 	if mark.Inode != 0 && mark.Inode != inode {
 		if rinfo, err := os.Stat(path + ".1"); err == nil && inodeOf(rinfo) == mark.Inode {
-			n, c, _ := readHookFrom(path+".1", mark.Offset, state)
-			res.BytesRead += n
-			res.Compactions += c
+			n, c, _ := readLinesFrom(path+".1", mark.Offset, apply)
+			total += n
+			accepted += c
 		}
 		mark.Offset = 0
 	}
 	if info.Size() < mark.Offset {
 		mark.Offset = 0 // truncated in place
 	}
-	n, c, err := readHookFrom(path, mark.Offset, state)
+	n, c, err := readLinesFrom(path, mark.Offset, apply)
 	if err != nil {
-		return res, err
+		return total, accepted, err
 	}
-	res.BytesRead += n
-	res.Compactions += c
+	total += n
+	accepted += c
 	mark.Inode = inode
 	mark.Size = info.Size()
 	mark.Offset += n
 	mark.ParsedAt = time.Now().UTC()
-	return res, nil
+	return total, accepted, nil
 }
 
-// readHookFrom reads complete lines from offset and returns the bytes it
-// committed (never past the last newline) and the compactions it counted.
-func readHookFrom(path string, offset int64, state *State) (int64, int, error) {
+// readLinesFrom reads complete lines from offset and returns the bytes it
+// committed (never past the last newline) and the lines apply accepted.
+func readLinesFrom(path string, offset int64, apply func([]byte) bool) (int64, int, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, 0, err
@@ -111,7 +123,7 @@ func readHookFrom(path string, offset int64, state *State) (int64, int, error) {
 		line, err := br.ReadBytes('\n')
 		if len(line) > 0 && line[len(line)-1] == '\n' {
 			read += int64(len(line))
-			if applyHookLine(line, state) {
+			if apply(line) {
 				counted++
 			}
 		}

@@ -39,11 +39,22 @@ the session id replaced by an HMAC under your tenant's usage key. The first
 upload-enabled run records a consent boundary; sessions that started before it
 are never uploaded.
 
+Sessions claimed for a study assignment ('codastre study start') are uploaded
+regardless of the boundary — joining the study was the consent for that
+session — but still only with CODASTRE_USAGE_REPORT=1 and --upload.
+
+History from before the boundary is reachable only through --backfill, one
+explicit run at a time: on its own it prints exactly what would be sent and
+sends nothing; with --upload it asks you to type "yes" (or takes --yes when
+not on a terminal). Nothing about a backfill is remembered as consent.
+
 Examples:
   codastre collect
   codastre collect --limit 20
   codastre collect --json
-  CODASTRE_USAGE_REPORT=1 codastre collect --upload`,
+  CODASTRE_USAGE_REPORT=1 codastre collect --upload
+  codastre collect --backfill
+  CODASTRE_USAGE_REPORT=1 codastre collect --backfill --upload`,
 	Args:         cobra.NoArgs,
 	SilenceUsage: true,
 	RunE:         runCollect,
@@ -58,6 +69,9 @@ var (
 	collectUpload    bool
 	collectServerURL string
 	collectKey       string
+
+	collectBackfill bool
+	collectYes      bool
 )
 
 func init() {
@@ -69,10 +83,15 @@ func init() {
 	f.BoolVar(&collectUpload, "upload", false, "Upload counters to the server (requires CODASTRE_USAGE_REPORT=1)")
 	f.StringVar(&collectServerURL, "server", defaultServerURL(), "Server URL, for --upload [$CODASTRE_SERVER]")
 	f.StringVar(&collectKey, "key", "", "API key, for --upload (overrides $CODASTRE_API_KEY and keychain)")
+	f.BoolVar(&collectBackfill, "backfill", false, "Target history from before the consent boundary: preview it, or upload it with --upload")
+	f.BoolVar(&collectYes, "yes", false, "Confirm a --backfill --upload without the interactive prompt")
 	rootCmd.AddCommand(collectCmd)
 }
 
 func runCollect(cmd *cobra.Command, _ []string) error {
+	if collectYes && !collectBackfill {
+		return fmt.Errorf("--yes only confirms a --backfill --upload")
+	}
 	if collectUpload && !usage.UploadEnabled() {
 		return fmt.Errorf("--upload needs the opt-in CODASTRE_USAGE_REPORT=1: nothing is " +
 			"uploaded unless you set it — the local collection works without it")
@@ -104,6 +123,12 @@ func runCollect(cmd *cobra.Command, _ []string) error {
 	hooks, err := transcript.CollectHookEvents(transcript.HookLogPath(), state)
 	if err != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: hook event log: %v\n", err)
+	}
+	if _, err := transcript.CollectStudyLog(transcript.StudyLogPath(), state); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: study log: %v\n", err)
+	}
+	if collectBackfill {
+		return runBackfill(cmd, state, statePath)
 	}
 
 	var up *report.Result
@@ -177,6 +202,9 @@ func renderUpload(w io.Writer, r report.Result) {
 		r.Sessions.Received, r.Sessions.Inserted, r.Sessions.Updated, r.Sessions.Skipped)
 	fmt.Fprintf(w, "%d sessions eligible; %d started before the consent boundary (%s) and stay local",
 		r.SessionsEligible, r.SessionsBeforeConsent, r.ReportSince.Format(time.RFC3339))
+	if r.StudySessions > 0 {
+		fmt.Fprintf(w, "; %d study sessions reported under their assignment", r.StudySessions)
+	}
 	if r.SessionsWithoutCost > 0 {
 		fmt.Fprintf(w, "; %d have no cost record yet and wait", r.SessionsWithoutCost)
 	}
