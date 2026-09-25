@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/codastre/cli/internal/transcript"
 	"github.com/codastre/cli/internal/usage"
 	"github.com/spf13/cobra"
 )
@@ -44,6 +45,7 @@ var (
 	savingsWindow  string
 	savingsJSON    bool
 	savingsLogPath string
+	savingsSource  string
 )
 
 func init() {
@@ -51,6 +53,7 @@ func init() {
 	f.StringVar(&savingsWindow, "window", "30d", "Window to summarise: 7d | 30d | all | <N>d")
 	f.BoolVar(&savingsJSON, "json", false, "Emit the summary as JSON")
 	f.StringVar(&savingsLogPath, "log", "", "Path to the token log [$CODASTRE_TOKEN_LOG]")
+	f.StringVar(&savingsSource, "source", "auto", "Which source to report: auto | transcript | log")
 	rootCmd.AddCommand(savingsCmd)
 }
 
@@ -58,6 +61,21 @@ func runSavings(cmd *cobra.Command, _ []string) error {
 	since, window, err := usage.ParseWindow(savingsWindow, time.Now())
 	if err != nil {
 		return err
+	}
+
+	switch savingsSource {
+	case "auto", "transcript", "log":
+	default:
+		return fmt.Errorf("invalid --source %q: use auto, transcript, or log", savingsSource)
+	}
+	if savingsSource != "log" {
+		done, err := savingsFromTranscript(cmd, window, since)
+		if err != nil || done {
+			return err
+		}
+		if savingsSource == "transcript" {
+			return nil
+		}
 	}
 
 	logPath := savingsLogPath
@@ -86,6 +104,33 @@ func runSavings(cmd *cobra.Command, _ []string) error {
 	}
 	usage.Render(cmd.OutOrStdout(), summary)
 	return nil
+}
+
+// savingsFromTranscript reports the exact source when `codastre collect` has
+// something to show. The bool says whether it answered: under `--source auto`
+// an empty collection falls through to the log rather than printing a page of
+// zeroes.
+func savingsFromTranscript(cmd *cobra.Command, window string, since time.Time) (bool, error) {
+	statePath := transcript.StatePath()
+	state := transcript.LoadState(statePath)
+	sessions := state.SessionsSince(since)
+	if len(sessions) == 0 {
+		if savingsSource == "transcript" {
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "No collected sessions in the %s window.\n", window)
+			fmt.Fprintln(out, "Run `codastre collect` to parse the transcripts already on this machine.")
+			return true, nil
+		}
+		return false, nil
+	}
+	summary := transcript.Summarise(sessions, window, statePath, since)
+	if savingsJSON {
+		enc := json.NewEncoder(cmd.OutOrStdout())
+		enc.SetIndent("", "  ")
+		return true, enc.Encode(summary)
+	}
+	transcript.Render(cmd.OutOrStdout(), summary)
+	return true, nil
 }
 
 // noLogYet reports an absent log in the requested format and exits 0. Nothing

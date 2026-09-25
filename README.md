@@ -125,7 +125,8 @@ codastre graph PaymentService.charge --kind calls --depth 2
 | `codastre query <text>` | Hybrid semantic + lexical code search — no MCP connection required |
 | `codastre graph <symbol>` | Traverse the cross-repo relationship graph from a symbol or chunk |
 | `codastre masking-key` | Copy a repo's HMAC masking key to the clipboard (hex) |
-| `codastre savings` | Summarise your own search-tool usage from the local log (no server call) |
+| `codastre collect` | Parse local Claude Code transcripts into usage counters (local only) |
+| `codastre savings` | Summarise your own search-tool usage — transcripts or the local log |
 | `codastre dashboard` | Open the web dashboard in an already-authenticated session |
 | `codastre doctor` | Run diagnostics — exit `0` = all pass, `1` = error, `2` = warnings only |
 | `codastre logout` | Revoke the stored API key server-side and remove it from the keychain |
@@ -133,34 +134,57 @@ codastre graph PaymentService.charge --kind calls --depth 2
 
 Run `codastre <command> --help` for flags and details.
 
-## 📊 What it cost you — `codastre savings`
+## 📊 What it cost you — `codastre collect` + `codastre savings`
 
 ```bash
+codastre collect              # parse the transcripts already on this machine
 codastre savings              # last 30 days
 codastre savings --window 7d
 codastre savings --window all --json
 ```
 
-Reads the local JSONL log the Claude Code plugin writes when
-`CODASTRE_TRACK_TOKENS=1` (or while a live A/B mode is on) and groups it by what
-ran: codastre on the MCP plane, codastre on the CLI plane, text search, and file
-reads — plus sessions, workspaces and active days, and the codastre-vs-grep call
-ratio in whichever direction your log points.
+Two sources, reported one at a time and **never summed**:
+
+- **transcripts** (`codastre collect`) — Claude Code's own session records, already
+  on disk. Exact tokens, measured USD, wall-clock and tool time, per-tool result
+  bytes, and one search episode per turn. Incremental: each file resumes from a
+  watermark, so a re-run with nothing appended reads nothing.
+- **the plugin log** — byte-ratio estimates (±20%), but the only source that covers
+  Cursor, Codex and other MCP clients. Written when `CODASTRE_TRACK_TOKENS=1` or
+  while a live A/B mode is on.
+
+`--source auto` (the default) prefers the transcript when a collection exists and
+falls back to the log; `--source transcript|log` pins it.
 
 ```
-  Codastre (MCP QUERY/GRAPH)   180 calls   ~573,277 tok
-  Text search (grep/glob)      434 calls   ~242,484 tok
-  File reads                   172 calls   ~223,703 tok
-  Codastre (CLI plane)          47 calls    ~92,712 tok
-  TOTAL                        833 calls  ~1,132,176 tok
+Sessions
+  159 sessions · 885 turns · 16 projects · 20 active days
+  $748.61 measured spend · 1744.1 h wall clock · 5.4 h in tools
+
+Context
+  re-read amplification 96% = 1,225,649,437 / (1,225,649,437 + 40,252,761 + 5,997,126)
+
+Search episodes (one per turn)
+  codastre only                17 ←
+  fallback after codastre      47
+  codastre failed               3
+  text search only            282
+
+  answered without fallback: 17 / 67 = 25.4%
 ```
 
-Two things it deliberately does not do. **It never leaves the machine** — no server
-call, no upload, no opt-in beyond the one that wrote the log, and it prints counters
-only, never a logged query string or file path. And **it reports no savings figure**:
-there is no observable counterfactual for a search that never ran, so none is computed.
-Token counts are byte-ratio estimates (±20%), exclude reasoning tokens, and are not
-billing-grade. `codastre doctor` states in one line whether logging and upload are on.
+Both failure rows and the denominator are always shown: a rate that hides its
+denominator reads as marketing.
+
+Three things these commands deliberately do not do. **Nothing leaves the machine** —
+no server call, no upload, no opt-in, and the parse of a transcript keeps counts,
+byte totals and timestamps only. Prompts, code, paths and tool output are never
+stored or printed, which tests assert directly. **No savings figure** is reported:
+there is no observable counterfactual for a search that never ran, so none is
+computed. And **sources are never mixed** — exact transcript counts and estimated
+log tokens answer different questions, and a run says which one it used.
+`codastre doctor` states in one line whether logging, collection and upload are on,
+and fails if any OTel content-logging variable is set.
 
 ## 🔒 Privacy by design
 
@@ -189,6 +213,8 @@ dashboard's security-posture view is explicit about exactly where the guarantee 
 | `CODASTRE_API_KEY` / `--key` | API key override; takes precedence over the keychain |
 | `CODASTRE_TRACK_TOKENS` | Set to `1` to have the Claude Code plugin log search-tool usage locally |
 | `CODASTRE_TOKEN_LOG` | Override the log path (default `~/.config/codastre/claude-token-log.jsonl`) |
+| `CLAUDE_PROJECTS_DIR` | Transcript root for `codastre collect` (default `~/.claude/projects`) |
+| `CODASTRE_COLLECT_STATE` | Collected-counter state file (default `~/.config/codastre/collect-state.json`) |
 
 ## 🔗 Learn more
 

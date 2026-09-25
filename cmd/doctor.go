@@ -13,6 +13,7 @@ import (
 	"github.com/codastre/cli/internal/clientheader"
 	"github.com/codastre/cli/internal/git"
 	"github.com/codastre/cli/internal/keychain"
+	"github.com/codastre/cli/internal/transcript"
 	"github.com/codastre/cli/internal/usage"
 	"github.com/spf13/cobra"
 )
@@ -187,6 +188,20 @@ func runDoctor(cmd *cobra.Command, _ []string) {
 		warning: true,
 		detail:  usageTrackingDetail(),
 	})
+
+	// 6c. OTel content logging must stay unset. Prompts and responses are
+	// redacted by default and that default is load-bearing: with any of these
+	// five on, a telemetry pipeline starts carrying source code and prompts.
+	// This is the one usage finding that fails the run.
+	if leaked := otelContentVars(); len(leaked) > 0 {
+		findings = append(findings, finding{
+			label:  "otel content logging",
+			ok:     false,
+			detail: "enabled: " + strings.Join(leaked, ", ") + " — unset these; prompts and tool output must not be exported",
+		})
+	} else {
+		findings = append(findings, finding{label: "otel content logging", ok: true, detail: "off"})
+	}
 
 	// 7. Last sync result (advisory).
 	findings = append(findings, finding{label: "last sync", ok: true, detail: "no sync recorded yet"})
@@ -379,5 +394,28 @@ func usageTrackingDetail() string {
 			parts = append(parts, fmt.Sprintf("%s (%d KB)", path, info.Size()/1024))
 		}
 	}
+	if n := len(transcript.LoadState(transcript.StatePath()).Sessions); n > 0 {
+		parts = append(parts, fmt.Sprintf("%s collected from transcripts", countLabel(n, "session")))
+	} else {
+		parts = append(parts, "no transcripts collected — run `codastre collect`")
+	}
 	return strings.Join(parts, "; ")
+}
+
+// otelContentVars lists the Claude Code telemetry variables that would export
+// prompts, responses or tool content. All five must stay unset.
+func otelContentVars() []string {
+	var on []string
+	for _, name := range []string{
+		"OTEL_LOG_USER_PROMPTS",
+		"OTEL_LOG_ASSISTANT_RESPONSES",
+		"OTEL_LOG_TOOL_DETAILS",
+		"OTEL_LOG_TOOL_CONTENT",
+		"OTEL_LOG_RAW_API_BODIES",
+	} {
+		if v := os.Getenv(name); v != "" && v != "0" && !strings.EqualFold(v, "false") {
+			on = append(on, name)
+		}
+	}
+	return on
 }
