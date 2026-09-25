@@ -125,12 +125,42 @@ codastre graph PaymentService.charge --kind calls --depth 2
 | `codastre query <text>` | Hybrid semantic + lexical code search — no MCP connection required |
 | `codastre graph <symbol>` | Traverse the cross-repo relationship graph from a symbol or chunk |
 | `codastre masking-key` | Copy a repo's HMAC masking key to the clipboard (hex) |
+| `codastre savings` | Summarise your own search-tool usage from the local log (no server call) |
 | `codastre dashboard` | Open the web dashboard in an already-authenticated session |
 | `codastre doctor` | Run diagnostics — exit `0` = all pass, `1` = error, `2` = warnings only |
 | `codastre logout` | Revoke the stored API key server-side and remove it from the keychain |
 | `codastre version` | Print the CLI version |
 
 Run `codastre <command> --help` for flags and details.
+
+## 📊 What it cost you — `codastre savings`
+
+```bash
+codastre savings              # last 30 days
+codastre savings --window 7d
+codastre savings --window all --json
+```
+
+Reads the local JSONL log the Claude Code plugin writes when
+`CODASTRE_TRACK_TOKENS=1` (or while a live A/B mode is on) and groups it by what
+ran: codastre on the MCP plane, codastre on the CLI plane, text search, and file
+reads — plus sessions, workspaces and active days, and the codastre-vs-grep call
+ratio in whichever direction your log points.
+
+```
+  Codastre (MCP QUERY/GRAPH)   180 calls   ~573,277 tok
+  Text search (grep/glob)      434 calls   ~242,484 tok
+  File reads                   172 calls   ~223,703 tok
+  Codastre (CLI plane)          47 calls    ~92,712 tok
+  TOTAL                        833 calls  ~1,132,176 tok
+```
+
+Two things it deliberately does not do. **It never leaves the machine** — no server
+call, no upload, no opt-in beyond the one that wrote the log, and it prints counters
+only, never a logged query string or file path. And **it reports no savings figure**:
+there is no observable counterfactual for a search that never ran, so none is computed.
+Token counts are byte-ratio estimates (±20%), exclude reasoning tokens, and are not
+billing-grade. `codastre doctor` states in one line whether logging and upload are on.
 
 ## 🔒 Privacy by design
 
@@ -157,6 +187,8 @@ dashboard's security-posture view is explicit about exactly where the guarantee 
 | --- | --- |
 | `CODASTRE_SERVER` / `--server` | Codastre server URL (defaults to the managed service) |
 | `CODASTRE_API_KEY` / `--key` | API key override; takes precedence over the keychain |
+| `CODASTRE_TRACK_TOKENS` | Set to `1` to have the Claude Code plugin log search-tool usage locally |
+| `CODASTRE_TOKEN_LOG` | Override the log path (default `~/.config/codastre/claude-token-log.jsonl`) |
 
 ## 🔗 Learn more
 

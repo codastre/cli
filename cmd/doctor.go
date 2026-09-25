@@ -13,6 +13,7 @@ import (
 	"github.com/codastre/cli/internal/clientheader"
 	"github.com/codastre/cli/internal/git"
 	"github.com/codastre/cli/internal/keychain"
+	"github.com/codastre/cli/internal/usage"
 	"github.com/spf13/cobra"
 )
 
@@ -175,6 +176,17 @@ func runDoctor(cmd *cobra.Command, _ []string) {
 			detail:  map[bool]string{true: "manifest mode will be used for syncs", false: ""}[isShallow],
 		})
 	}
+
+	// 6b. Local usage tracking (informational): names in one line whether the
+	// plugin is logging search usage locally, and whether anything is being
+	// uploaded. Never fails the run — both answers are legitimate, and the
+	// point is that "is anything leaving my machine" is stated, not inferred.
+	findings = append(findings, finding{
+		label:   "usage tracking",
+		ok:      true,
+		warning: true,
+		detail:  usageTrackingDetail(),
+	})
 
 	// 7. Last sync result (advisory).
 	findings = append(findings, finding{label: "last sync", ok: true, detail: "no sync recorded yet"})
@@ -344,4 +356,28 @@ func remoteRank(name string) int {
 	default:
 		return 2
 	}
+}
+
+// usageTrackingDetail describes the local token log and the upload flag, in
+// that order: what is recorded, then what is shared. Both are opt-in and
+// independent — tracking writes to disk, upload is a separate decision that
+// nothing in the CLI acts on yet.
+func usageTrackingDetail() string {
+	parts := []string{}
+	if usage.TrackingEnabled() {
+		parts = append(parts, "local log on (CODASTRE_TRACK_TOKENS=1)")
+	} else {
+		parts = append(parts, "local log off — set CODASTRE_TRACK_TOKENS=1 for `codastre savings`")
+	}
+	if usage.UploadEnabled() {
+		parts = append(parts, "upload on (CODASTRE_USAGE_REPORT=1)")
+	} else {
+		parts = append(parts, "upload off — nothing leaves this machine")
+	}
+	if path := usage.DefaultLogPath(); path != "" {
+		if info, err := os.Stat(path); err == nil {
+			parts = append(parts, fmt.Sprintf("%s (%d KB)", path, info.Size()/1024))
+		}
+	}
+	return strings.Join(parts, "; ")
 }
