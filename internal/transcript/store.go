@@ -11,7 +11,7 @@ import (
 // StateVersion guards the on-disk format. A bump discards the old state and
 // re-parses from scratch, which is always safe: the transcripts are the source
 // of truth and the state file is only a cache.
-const StateVersion = 1
+const StateVersion = 2
 
 // FileMark is the per-file watermark: identity plus how far the parse got.
 // Identity is (inode, size) — a rotated or replaced file has a new inode, and
@@ -31,6 +31,15 @@ type State struct {
 	Version  int                  `json:"version"`
 	Files    map[string]*FileMark `json:"files"`
 	Sessions map[string]*Session  `json:"sessions"`
+	// HookLog is the watermark into the hook event log (session-events.jsonl).
+	HookLog *FileMark `json:"hook_log,omitempty"`
+	// Compactions is keyed by raw session id. It lives beside Sessions, not
+	// on them, because a hook event can arrive before its transcript is
+	// collected and must survive a session being rebuilt from zero.
+	Compactions map[string]*Compactions `json:"compactions,omitempty"`
+	// ReportSince is the consent boundary (D7): set by the first
+	// upload-enabled run, and no session that started earlier is uploaded.
+	ReportSince time.Time `json:"report_since,omitzero"`
 }
 
 // StatePath is where the collection lives: the same config root as the
@@ -50,7 +59,12 @@ func StatePath() string {
 // LoadState reads the state file. A missing, unreadable or stale-versioned
 // file yields an empty state rather than an error — the cache is disposable.
 func LoadState(path string) *State {
-	empty := &State{Version: StateVersion, Files: map[string]*FileMark{}, Sessions: map[string]*Session{}}
+	empty := &State{
+		Version:     StateVersion,
+		Files:       map[string]*FileMark{},
+		Sessions:    map[string]*Session{},
+		Compactions: map[string]*Compactions{},
+	}
 	if path == "" {
 		return empty
 	}
@@ -67,6 +81,9 @@ func LoadState(path string) *State {
 	}
 	if s.Sessions == nil {
 		s.Sessions = map[string]*Session{}
+	}
+	if s.Compactions == nil {
+		s.Compactions = map[string]*Compactions{}
 	}
 	return &s
 }

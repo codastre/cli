@@ -150,6 +150,7 @@ func stageTranscript(t *testing.T) string {
 	}
 	t.Setenv("CLAUDE_PROJECTS_DIR", root)
 	t.Setenv("CODASTRE_COLLECT_STATE", filepath.Join(t.TempDir(), "collect-state.json"))
+	t.Setenv("CODASTRE_SESSION_EVENTS_LOG", filepath.Join(t.TempDir(), "session-events.jsonl"))
 	return root
 }
 
@@ -164,6 +165,7 @@ func execRoot(t *testing.T, args ...string) (string, error) {
 		rootCmd.SetArgs(nil)
 		savingsWindow, savingsJSON, savingsLogPath, savingsSource = "30d", false, "", "auto"
 		collectLimit, collectJSON, collectRoot, collectReset = 0, false, "", false
+		collectUpload, collectServerURL, collectKey = false, defaultServerURL(), ""
 	})
 	rootCmd.SetArgs(args)
 	err := rootCmd.Execute()

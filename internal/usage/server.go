@@ -15,15 +15,17 @@ import (
 )
 
 // ServerSummary is the subset of GET /v1/me/usage the CLI renders. Unknown and
-// future fields (Plane 3 episodes land in M3) are ignored here and preserved in
-// Raw, so an older CLI against a newer server prints what it understands rather
-// than failing.
+// future fields are ignored here and preserved in Raw, so an older CLI against
+// a newer server prints what it understands rather than failing.
 type ServerSummary struct {
 	Window          string        `json:"window"`
 	Calls           int           `json:"calls"`
 	EnvelopeTokens  int           `json:"envelope_tokens"`
 	ReposTouchedGE2 int           `json:"repos_touched_ge2"`
 	Receipt         ServerReceipt `json:"receipt"`
+	// Episodes is the Plane 3 block. The server omits it (rather than
+	// zeroing it) when the caller has no episodes, and so does the rendering.
+	Episodes *ServerEpisodes `json:"episodes"`
 
 	// Raw is the server's response body, byte for byte, for --json passthrough.
 	Raw json.RawMessage `json:"-"`
@@ -40,6 +42,20 @@ type ServerReceipt struct {
 	Provenance string          `json:"provenance"`
 	Caveat     string          `json:"caveat"`
 	RerunCmd   string          `json:"rerun_cmd"`
+}
+
+// ServerEpisodes is the caller's own episode outcomes (Plane 3). It carries
+// its own receipt: the planes are never combined into one figure.
+type ServerEpisodes struct {
+	Source                  string         `json:"source"`
+	Total                   int            `json:"total"`
+	CodastreOnly            int            `json:"codastre_only"`
+	FallbackAfterCodastre   int            `json:"fallback_after_codastre"`
+	CodastreFailed          int            `json:"codastre_failed"`
+	TextSearchOnly          int            `json:"text_search_only"`
+	Unclassified            int            `json:"unclassified"`
+	AnsweredWithoutFallback *float64       `json:"answered_without_fallback"`
+	Receipt                 *ServerReceipt `json:"receipt"`
 }
 
 // ErrServerSourceUnsupported reports a deployment with no /v1/me/usage.
@@ -111,7 +127,37 @@ func RenderServer(w io.Writer, serverURL string, s ServerSummary) {
 	fmt.Fprintf(w, "  %-26s %s\n", "repos touched (≥2)", thousands(s.ReposTouchedGE2))
 
 	renderReceipt(w, s.Receipt)
+	if s.Episodes != nil {
+		renderServerEpisodes(w, *s.Episodes)
+	}
 	fmt.Fprintln(w, "\nNo counterfactual is computed: these are counts of what ran.")
+}
+
+// renderServerEpisodes prints the episode outcomes with the denominator and
+// both failure rows visible, so the bad news can be computed by the reader.
+func renderServerEpisodes(w io.Writer, e ServerEpisodes) {
+	source := e.Source
+	if source == "" {
+		source = "unknown"
+	}
+	fmt.Fprintf(w, "\nEpisodes — source: %s\n", source)
+	denom := e.CodastreOnly + e.FallbackAfterCodastre + e.CodastreFailed
+	fmt.Fprintf(w, "  %-26s %s\n", "episodes", thousands(e.Total))
+	fmt.Fprintf(w, "  %-26s %s\n", "with a codastre call", thousands(denom))
+	fmt.Fprintf(w, "  ├─ %-23s %s   ← numerator\n", "codastre only", thousands(e.CodastreOnly))
+	fmt.Fprintf(w, "  ├─ %-23s %s\n", "fallback after codastre", thousands(e.FallbackAfterCodastre))
+	fmt.Fprintf(w, "  └─ %-23s %s\n", "codastre failed", thousands(e.CodastreFailed))
+	fmt.Fprintf(w, "  %-26s %s\n", "text search only", thousands(e.TextSearchOnly))
+	fmt.Fprintf(w, "  %-26s %s   (in no rate)\n", "unclassified", thousands(e.Unclassified))
+	if e.AnsweredWithoutFallback != nil {
+		fmt.Fprintf(w, "  answered without fallback: %d / %d = %.1f%%\n",
+			e.CodastreOnly, denom, *e.AnsweredWithoutFallback*100)
+	} else {
+		fmt.Fprintln(w, "  answered without fallback: n/a (no episode with a codastre call)")
+	}
+	if e.Receipt != nil {
+		renderReceipt(w, *e.Receipt)
+	}
 }
 
 // renderReceipt prints the server's transparency block verbatim — the strings

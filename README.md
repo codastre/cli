@@ -125,7 +125,7 @@ codastre graph PaymentService.charge --kind calls --depth 2
 | `codastre query <text>` | Hybrid semantic + lexical code search — no MCP connection required |
 | `codastre graph <symbol>` | Traverse the cross-repo relationship graph from a symbol or chunk |
 | `codastre masking-key` | Copy a repo's HMAC masking key to the clipboard (hex) |
-| `codastre collect` | Parse local Claude Code transcripts into usage counters (local only) |
+| `codastre collect` | Parse local Claude Code transcripts into usage counters (local; `--upload` is opt-in) |
 | `codastre savings` | Summarise your own search-tool usage — transcripts, the local log, or the server |
 | `codastre dashboard` | Open the web dashboard in an already-authenticated session |
 | `codastre doctor` | Run diagnostics — exit `0` = all pass, `1` = error, `2` = warnings only |
@@ -194,6 +194,31 @@ log tokens answer different questions, and a run says which one it used.
 `codastre doctor` states in one line whether logging, collection and upload are on,
 and fails if any OTel content-logging variable is set.
 
+### Sharing your counters — `codastre collect --upload` (opt-in)
+
+```bash
+export CODASTRE_USAGE_REPORT=1   # the opt-in; without it --upload refuses to run
+codastre collect --upload
+```
+
+Upload is opt-in twice — the variable *and* the flag — and sends **counters only**:
+one row per search turn (outcome, call counts, result bytes, two timestamps) and one
+row per finished session (measured cost, token split, durations, per-tool call and
+byte counts, context compactions). There is no free-text field on the wire; the
+session id is replaced by an HMAC under your tenant's usage key
+(`GET /v1/me/usage/session-key`), and your cwd, project, branch, prompts, paths and
+tool output never leave the machine — tests assert the upload body against a key
+allowlist.
+
+- **Consent boundary.** The first upload-enabled run records `report_since`; sessions
+  that started earlier stay local. History from before it is never swept up by the flag.
+- **Incremental.** Each run sends only new episodes and sessions whose counters changed;
+  the server is idempotent, so a retry is harmless.
+- **Compactions** come from the plugin's `PreCompact` hook log
+  (`~/.config/codastre/session-events.jsonl`); a transcript does not record them.
+- `codastre savings --source server` then shows your episode outcomes beside your
+  call counts — each with its own receipt, never combined.
+
 ## 🔒 Privacy by design
 
 The server is never trusted with your source. The CLI enforces that boundary:
@@ -223,6 +248,8 @@ dashboard's security-posture view is explicit about exactly where the guarantee 
 | `CODASTRE_TOKEN_LOG` | Override the log path (default `~/.config/codastre/claude-token-log.jsonl`) |
 | `CLAUDE_PROJECTS_DIR` | Transcript root for `codastre collect` (default `~/.claude/projects`) |
 | `CODASTRE_COLLECT_STATE` | Collected-counter state file (default `~/.config/codastre/collect-state.json`) |
+| `CODASTRE_SESSION_EVENTS_LOG` | Hook event log read by `codastre collect` (default `~/.config/codastre/session-events.jsonl`) |
+| `CODASTRE_USAGE_REPORT` | Set to `1` to allow `codastre collect --upload` to send counters to the server |
 
 ## 🔗 Learn more
 

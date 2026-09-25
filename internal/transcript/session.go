@@ -83,6 +83,12 @@ type Session struct {
 	ClassMix map[string]*ToolStat    `json:"class_mix"`
 	Episodes map[string]*EpisodeStat `json:"episodes"`
 	Turns    int                     `json:"turns"`
+	// EpisodeLog holds the individual search episodes — turns whose outcome
+	// is not `unclassified`. A turn that ran no search is volume, not an
+	// episode, and is counted in Turns only.
+	EpisodeLog []Episode `json:"episode_log,omitempty"`
+	// Upload is what has already been reported to the server.
+	Upload UploadMark `json:"upload"`
 }
 
 // SourceTranscript is the `source` value every session parsed here carries.
@@ -170,6 +176,7 @@ func (s *Session) Merge(inc *Session) {
 	s.Messages.ThinkingTokens += inc.Messages.ThinkingTokens
 	s.Messages.CacheReadTokens += inc.Messages.CacheReadTokens
 	s.Messages.CacheCreationTokens += inc.Messages.CacheCreationTokens
+	s.appendEpisodes(inc, s.Turns)
 	s.Turns += inc.Turns
 
 	if s.ToolMix == nil {

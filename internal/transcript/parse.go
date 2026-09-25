@@ -68,6 +68,9 @@ type parser struct {
 	// is what moves the commit boundary forward.
 	closedHere bool
 	turn       turnState
+	// lineTS is the timestamp of the line being processed (zero if absent);
+	// it bounds the open turn's start and end.
+	lineTS time.Time
 	// toolNames maps a tool_use id to its class/plane/name, so the result
 	// record that arrives later can be attributed without re-reading the call.
 	toolNames map[string]toolRef
@@ -89,6 +92,9 @@ type turnState struct {
 	// fallback records that a text search or a file read happened *after* a
 	// codastre call in the same turn — the two-sided signal.
 	fallback bool
+
+	startedAt time.Time
+	endedAt   time.Time
 }
 
 func (p *parser) line(raw []byte) {
@@ -109,7 +115,9 @@ func (p *parser) line(raw []byte) {
 	if rec.Version != "" {
 		s.ClientVersion = rec.Version
 	}
+	p.lineTS = time.Time{}
 	if ts, err := time.Parse(time.RFC3339, rec.Timestamp); err == nil {
+		p.lineTS = ts
 		if s.StartedAt.IsZero() || ts.Before(s.StartedAt) {
 			s.StartedAt = ts
 		}
@@ -165,6 +173,7 @@ func (p *parser) assistant(rec record) {
 	if rec.Message == nil {
 		return
 	}
+	p.touchTurn()
 	if u := rec.Message.Usage; u != nil {
 		m := &p.target().Messages
 		m.Messages++
@@ -229,6 +238,7 @@ func (p *parser) toolResult(b contentBlock, fallbackPayload json.RawMessage) {
 		cst.Errors++
 	}
 	p.countBytes(ref.class, size, b.IsError)
+	p.touchTurn()
 	delete(p.toolNames, b.ToolUseID)
 }
 
@@ -268,9 +278,18 @@ func (p *parser) countBytes(class string, size int64, isErr bool) {
 	}
 }
 
+// touchTurn extends the open turn's end to the current line. Only assistant
+// and tool-result lines count: the prompt that opens the next turn must not
+// stretch the previous one.
+func (p *parser) touchTurn() {
+	if p.turnOpen && p.lineTS.After(p.turn.endedAt) {
+		p.turn.endedAt = p.lineTS
+	}
+}
+
 func (p *parser) openTurn() {
 	p.turnOpen = true
-	p.turn = turnState{}
+	p.turn = turnState{startedAt: p.lineTS, endedAt: p.lineTS}
 	p.pending = newSession(p.session.SessionID)
 	p.pending.Turns = 1
 }
@@ -301,6 +320,21 @@ func (p *parser) closeTurn() {
 	st.TextSearchBytes += t.textBytes
 	st.ReadCalls += t.readCalls
 	st.ReadBytes += t.readBytes
+	if outcome != OutcomeUnclassified {
+		// Ordinal 0 within the one-turn increment; Merge rebases it onto the
+		// turns already counted.
+		p.pending.EpisodeLog = append(p.pending.EpisodeLog, Episode{
+			Outcome:         outcome,
+			StartedAt:       t.startedAt,
+			EndedAt:         t.endedAt,
+			CodastreCalls:   t.codastreCalls,
+			CodastreBytes:   t.codastreBytes,
+			TextSearchCalls: t.textCalls,
+			TextSearchBytes: t.textBytes,
+			ReadCalls:       t.readCalls,
+			ReadBytes:       t.readBytes,
+		})
+	}
 	p.turnOpen = false
 	p.closedHere = true
 	p.session.Merge(p.pending)

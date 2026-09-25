@@ -13,8 +13,6 @@ import (
 	"github.com/codastre/cli/internal/clientheader"
 	"github.com/codastre/cli/internal/git"
 	"github.com/codastre/cli/internal/keychain"
-	"github.com/codastre/cli/internal/transcript"
-	"github.com/codastre/cli/internal/usage"
 	"github.com/spf13/cobra"
 )
 
@@ -371,54 +369,4 @@ func remoteRank(name string) int {
 	default:
 		return 2
 	}
-}
-
-// usageTrackingDetail describes the local token log and the upload flag, in
-// that order: what is recorded, then what is shared. Both are opt-in and
-// independent — tracking writes to disk, upload is a separate decision that
-// nothing in the CLI acts on yet.
-func usageTrackingDetail() string {
-	parts := []string{}
-	if usage.TrackingEnabled() {
-		parts = append(parts, "local log on (CODASTRE_TRACK_TOKENS=1)")
-	} else {
-		parts = append(parts, "local log off — set CODASTRE_TRACK_TOKENS=1 for `codastre savings`")
-	}
-	if usage.UploadEnabled() {
-		parts = append(parts, "upload on (CODASTRE_USAGE_REPORT=1)")
-	} else {
-		parts = append(parts, "upload off — nothing leaves this machine")
-	}
-	if path := usage.DefaultLogPath(); path != "" {
-		if info, err := os.Stat(path); err == nil {
-			parts = append(parts, fmt.Sprintf("%s (%d KB)", path, info.Size()/1024))
-		}
-	}
-	if n := len(transcript.LoadState(transcript.StatePath()).Sessions); n > 0 {
-		parts = append(parts, fmt.Sprintf("%s collected from transcripts", countLabel(n, "session")))
-	} else {
-		parts = append(parts, "no transcripts collected — run `codastre collect`")
-	}
-	// Named last because it is the one source that leaves the machine, and
-	// only on an explicit flag.
-	parts = append(parts, "server counters on request (`codastre savings --source server`)")
-	return strings.Join(parts, "; ")
-}
-
-// otelContentVars lists the Claude Code telemetry variables that would export
-// prompts, responses or tool content. All five must stay unset.
-func otelContentVars() []string {
-	var on []string
-	for _, name := range []string{
-		"OTEL_LOG_USER_PROMPTS",
-		"OTEL_LOG_ASSISTANT_RESPONSES",
-		"OTEL_LOG_TOOL_DETAILS",
-		"OTEL_LOG_TOOL_CONTENT",
-		"OTEL_LOG_RAW_API_BODIES",
-	} {
-		if v := os.Getenv(name); v != "" && v != "0" && !strings.EqualFold(v, "false") {
-			on = append(on, name)
-		}
-	}
-	return on
 }

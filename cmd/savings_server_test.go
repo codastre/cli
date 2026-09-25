@@ -205,3 +205,25 @@ func TestSavingsRejectsUnknownSourceNamingServer(t *testing.T) {
 		t.Errorf("error = %q, want the full source list", err)
 	}
 }
+
+// An M3 server adds the episode block; it renders with the denominator and
+// both failure rows visible, and its own receipt.
+func TestSavingsServerRendersEpisodes(t *testing.T) {
+	body := `{"window":"30d","calls":10,"envelope_tokens":100,"repos_touched_ge2":1,
+	  "receipt":{"formula":"calls = count(usage_events)","provenance":"plane 1"},
+	  "episodes":{"source":"transcript","total":12,"codastre_only":6,"fallback_after_codastre":2,
+	    "codastre_failed":2,"text_search_only":1,"unclassified":1,"answered_without_fallback":0.6,
+	    "receipt":{"formula":"codastre_only / (codastre_only + fallback_after_codastre + codastre_failed)",
+	      "provenance":"plane 3"}}}`
+	srv, _ := stubUsageServer(t, http.StatusOK, body)
+	out, err := execServerSavings(t, srv.URL)
+	if err != nil {
+		t.Fatalf("savings: %v\n%s", err, out)
+	}
+	for _, want := range []string{"Episodes — source: transcript", "fallback after codastre",
+		"codastre failed", "6 / 10 = 60.0%", "provenance: plane 3"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
