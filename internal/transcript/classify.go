@@ -33,8 +33,8 @@ const (
 // disagree about what a "text search" is, which is worse than either
 // definition being wrong.
 var (
-	codastreTool = regexp.MustCompile(`(?i)codastre.*__(QUERY|GRAPH|REGISTER|SYNC)$`)
-	codastreCLI  = regexp.MustCompile("(?i)(?:^|[|;&(`]\\s*)(?:[^\\s|;&()`]*[/\\\\])?codastre(?:\\.exe)?\\s+(query|graph)\\b")
+	codastreTool = regexp.MustCompile(`(?i)codastre.*__(QUERY|GRAPH|CORPUS_SEARCH|CONTRACTS|REGISTER|SYNC)$`)
+	codastreCLI  = regexp.MustCompile("(?i)(?:^|[|;&(`]\\s*)(?:[^\\s|;&()`]*[/\\\\])?codastre(?:\\.exe)?\\s+(query|graph|corpora|corpus|contracts)\\b")
 	bashSearch   = regexp.MustCompile("(?i)" + `(?:^|[|;&(` + "`" + `]\s*)(?:grep|rg|ag|ack|fd|findstr)\b` +
 		`|\bgit\s+grep\b` +
 		`|\bxargs\b[^|;&]*\bgrep\b` +
@@ -51,10 +51,13 @@ func Classify(toolName, bashCommand string) (class, plane string) {
 	case toolName == "Grep" || toolName == "Glob":
 		return ClassTextSearch, ""
 	case toolName == "Bash":
-		if codastreCLI.MatchString(bashCommand) {
+		// Quoted arguments are blanked first (quotes.go), so a commit message
+		// mentioning "(grep" is not a grep.
+		masked := maskQuoted(bashCommand)
+		if codastreCLI.MatchString(masked) {
 			return ClassCodastre, PlaneCLI
 		}
-		if bashSearch.MatchString(bashCommand) {
+		if bashSearch.MatchString(masked) {
 			return ClassTextSearch, ""
 		}
 		return ClassOther, ""

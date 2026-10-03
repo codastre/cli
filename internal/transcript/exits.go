@@ -23,7 +23,9 @@ var noMatchExiters = map[string]bool{
 // the command text only; the caller still requires the result to say
 // "Exit code 1".
 func exitsOneOnNoMatch(command string) bool {
-	words := strings.Fields(lastSegment(command))
+	// Masked first, so the last segment is never inside a heredoc body and a
+	// `bash -c '…'` string counts as the commands it runs.
+	words := strings.Fields(lastSegment(strings.TrimRight(maskQuoted(command), " \t;")))
 	// Skip leading VAR=value assignments and the wrappers that pass the
 	// wrapped command's status through. xargs is not one: it turns a child's
 	// exit 1 into 123.

@@ -1,0 +1,35 @@
+{
+  "_comment": "Bash command -> class. Shared verbatim between codastre-claude adapters/claude/hooks/test/ and codastre cli/internal/transcript/testdata/; the hook (lib.js) and the transcript collector (classify.go) must agree on every row. Edit both copies together.",
+  "cases": [
+    {"command": "grep -rn \"foo\" src", "class": "text-search"},
+    {"command": "cd x && rg 'a|b'", "class": "text-search"},
+    {"command": "git grep -n foo", "class": "text-search"},
+    {"command": "ls | xargs grep foo", "class": "text-search"},
+    {"command": "find . -name '*.go'", "class": "text-search"},
+    {"command": "echo it\\'s; grep x f", "class": "text-search"},
+    {"command": "bash -c 'grep -rn x .'", "class": "text-search"},
+    {"command": "sh -lc \"rg foo\"", "class": "text-search"},
+    {"command": "eval 'grep x f'", "class": "text-search"},
+    {"command": "echo \"$(grep -c x f)\"", "class": "text-search"},
+    {"command": "echo \"`rg x`\"", "class": "text-search"},
+    {"command": "echo \"$(grep \"x y\" f)\"", "class": "text-search"},
+    {"command": "bash <<'EOF'\ngrep x f\nEOF", "class": "text-search"},
+    {"command": "cat <<EOF > notes.txt\nhello\nEOF\ngrep x notes.txt", "class": "text-search"},
+
+    {"command": "git commit -m \"fix (grep/rg/ag) handling\"", "class": "other"},
+    {"command": "git commit -q -m 'feat: classify (grep|rg) exits; rg too'", "class": "other"},
+    {"command": "git commit -F - <<'EOF'\nfeat: (grep|rg) exits\n; rg foo\nEOF", "class": "other"},
+    {"command": "python3 - <<'EOF'\nimport os\nos.system(\"grep x f\")\nEOF", "class": "other"},
+    {"command": "echo \"; rg foo\"", "class": "other"},
+    {"command": "gh pr create --title \"x\" --body \"steps: (grep foo) then | rg bar\"", "class": "other"},
+    {"command": "printf '%s\\n' '| grep x'", "class": "other"},
+    {"command": "git status", "class": "other"},
+
+    {"command": "codastre query \"grep usages\" --format agent", "class": "codastre"},
+    {"command": "codastre query \"x\" --top-k 6 | grep foo", "class": "codastre"},
+    {"command": "~/go/bin/codastre graph Foo --direction inbound", "class": "codastre"},
+    {"command": "codastre corpora \"ticket text\" --top-k 5", "class": "codastre"},
+    {"command": "codastre contracts --kind kafka", "class": "codastre"},
+    {"command": "git commit -m \"run codastre query x first\"", "class": "other"}
+  ]
+}
