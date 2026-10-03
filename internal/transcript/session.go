@@ -10,7 +10,21 @@ import "time"
 type ToolStat struct {
 	Calls       int   `json:"calls"`
 	ResultBytes int64 `json:"result_bytes"`
-	Errors      int   `json:"errors"`
+	// Errors are failed calls. A search that exited 1 because nothing matched
+	// is not one — Claude Code flags it as an error, but it is counted in
+	// NoMatch instead (see exitsOneOnNoMatch). ShellErrors is the subset of
+	// Errors the shell raised itself (see isShellError).
+	Errors      int `json:"errors"`
+	ShellErrors int `json:"shell_errors,omitempty"`
+	NoMatch     int `json:"no_match,omitempty"`
+}
+
+func (t *ToolStat) add(o *ToolStat) {
+	t.Calls += o.Calls
+	t.ResultBytes += o.ResultBytes
+	t.Errors += o.Errors
+	t.ShellErrors += o.ShellErrors
+	t.NoMatch += o.NoMatch
 }
 
 // CostState is the transcript's own cumulative accounting record. It is a
@@ -32,13 +46,17 @@ type CostState struct {
 	ThinkingTokens      int64   `json:"thinking_tokens"`
 	CacheReadTokens     int64   `json:"cache_read_tokens"`
 	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	// Models is the same record split per model, which is what lets an
+	// attributed share be priced (Finalize).
+	Models map[string]ModelUsage `json:"models,omitempty"`
 }
 
-// MessageTotals sums the per-assistant-message `usage` blocks. It is additive
-// across incremental parses, and it is the fallback for a session whose
-// transcript carries no cost-state record yet (a live session, or one killed
-// before it wrote one). It cannot produce USD — only the cost-state can, and
-// nothing here models a price.
+// MessageTotals sums the per-request `usage` blocks, once per API message id
+// (Claude Code repeats a request's usage on every content-block record). It
+// is additive across incremental parses, and it is the fallback for a session
+// whose transcript carries no cost-state record yet (a live session, or one
+// killed before it wrote one). It cannot produce USD — only the cost-state
+// can, and nothing here models a price.
 type MessageTotals struct {
 	Messages            int   `json:"messages"`
 	InputTokens         int64 `json:"input_tokens"`
@@ -80,9 +98,22 @@ type Session struct {
 	// name. It is kept separately because one tool name is not one class:
 	// `Bash` is a codastre call, a grep, or neither, depending on the command
 	// — which only the parse can see.
-	ClassMix map[string]*ToolStat    `json:"class_mix"`
-	Episodes map[string]*EpisodeStat `json:"episodes"`
-	Turns    int                     `json:"turns"`
+	ClassMix map[string]*ToolStat `json:"class_mix"`
+	// BashByClass splits the Bash row of ToolMix by class, so a report can
+	// tell a `codastre query` from a grep from a `git status`. Local only:
+	// the uploaded tool_mix keeps plain tool names.
+	BashByClass map[string]*ToolStat    `json:"bash_by_class,omitempty"`
+	Episodes    map[string]*EpisodeStat `json:"episodes"`
+	Turns       int                     `json:"turns"`
+	// CostByClass and EpisodeCost are the attributed search cost (cost.go),
+	// the latter keyed by episode ordinal. Both are local only.
+	CostByClass map[string]*Cost `json:"cost_by_class,omitempty"`
+	EpisodeCost map[int]*Cost    `json:"episode_cost,omitempty"`
+	// CacheWrites is the per-model TTL split of cache writes, observed in the
+	// transcript's own requests.
+	CacheWrites map[string]*CacheWrites `json:"cache_writes,omitempty"`
+	// Ledger is the context-window snapshot attribution resumes from.
+	Ledger *Ledger `json:"ledger,omitempty"`
 	// EpisodeLog holds the individual search episodes — turns whose outcome
 	// is not `unclassified`. A turn that ran no search is volume, not an
 	// episode, and is counted in Turns only.
@@ -125,6 +156,55 @@ func (s *Session) class(name string) *ToolStat {
 		s.ClassMix[name] = st
 	}
 	return st
+}
+
+// bash returns the Bash stat bucket for a class, creating it on first use.
+func (s *Session) bash(class string) *ToolStat {
+	if s.BashByClass == nil {
+		s.BashByClass = map[string]*ToolStat{}
+	}
+	st := s.BashByClass[class]
+	if st == nil {
+		st = &ToolStat{}
+		s.BashByClass[class] = st
+	}
+	return st
+}
+
+func (s *Session) classCost(class string) *Cost {
+	if s.CostByClass == nil {
+		s.CostByClass = map[string]*Cost{}
+	}
+	c := s.CostByClass[class]
+	if c == nil {
+		c = &Cost{}
+		s.CostByClass[class] = c
+	}
+	return c
+}
+
+func (s *Session) episodeCost(ordinal int) *Cost {
+	if s.EpisodeCost == nil {
+		s.EpisodeCost = map[int]*Cost{}
+	}
+	c := s.EpisodeCost[ordinal]
+	if c == nil {
+		c = &Cost{}
+		s.EpisodeCost[ordinal] = c
+	}
+	return c
+}
+
+func (s *Session) cacheWrites(model string) *CacheWrites {
+	if s.CacheWrites == nil {
+		s.CacheWrites = map[string]*CacheWrites{}
+	}
+	w := s.CacheWrites[model]
+	if w == nil {
+		w = &CacheWrites{}
+		s.CacheWrites[model] = w
+	}
+	return w
 }
 
 // episode returns the stat bucket for an outcome, creating it on first use.
@@ -183,16 +263,27 @@ func (s *Session) Merge(inc *Session) {
 		s.ToolMix = map[string]*ToolStat{}
 	}
 	for name, st := range inc.ToolMix {
-		dst := s.tool(name)
-		dst.Calls += st.Calls
-		dst.ResultBytes += st.ResultBytes
-		dst.Errors += st.Errors
+		s.tool(name).add(st)
 	}
 	for name, st := range inc.ClassMix {
-		dst := s.class(name)
-		dst.Calls += st.Calls
-		dst.ResultBytes += st.ResultBytes
-		dst.Errors += st.Errors
+		s.class(name).add(st)
+	}
+	for class, st := range inc.BashByClass {
+		s.bash(class).add(st)
+	}
+	for class, c := range inc.CostByClass {
+		s.classCost(class).add(c)
+	}
+	for ordinal, c := range inc.EpisodeCost {
+		s.episodeCost(ordinal).add(c)
+	}
+	for model, w := range inc.CacheWrites {
+		dst := s.cacheWrites(model)
+		dst.Ephemeral5m += w.Ephemeral5m
+		dst.Ephemeral1h += w.Ephemeral1h
+	}
+	if inc.Ledger != nil {
+		s.Ledger = inc.Ledger
 	}
 	if s.Episodes == nil {
 		s.Episodes = map[string]*EpisodeStat{}

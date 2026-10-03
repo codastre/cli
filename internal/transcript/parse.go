@@ -17,8 +17,23 @@ import (
 // rather than adds, so it is applied as soon as it is seen and re-applying it
 // on the next run changes nothing.
 func Parse(r io.Reader, offset int64) (*Session, int64, error) {
+	return ParseFrom(r, offset, nil)
+}
+
+// ParseFrom is Parse resuming an already collected session: `prev` supplies
+// the turn count (so episode ordinals are absolute) and the context ledger
+// (so results ingested in an earlier run keep being carried). prev is only
+// read; the increment is returned for the caller to Merge.
+func ParseFrom(r io.Reader, offset int64, prev *Session) (*Session, int64, error) {
 	s := newSession("")
-	p := &parser{session: s, offset: offset, commit: offset}
+	p := &parser{session: s, offset: offset, commit: offset, ledger: &Ledger{}}
+	if prev != nil {
+		p.baseTurns = prev.Turns
+		if prev.Ledger != nil {
+			p.ledger = prev.Ledger.clone()
+		}
+	}
+	defer func() { s.Ledger = p.ledger }()
 
 	br := bufio.NewReaderSize(r, 128*1024)
 	for {
@@ -74,27 +89,24 @@ type parser struct {
 	// toolNames maps a tool_use id to its class/plane/name, so the result
 	// record that arrives later can be attributed without re-reading the call.
 	toolNames map[string]toolRef
+
+	// baseTurns is the turn count already collected before offset, which
+	// makes an episode's ordinal absolute while the turn is still open.
+	baseTurns int
+	// seen holds the API message ids already counted in this parse.
+	seen map[string]bool
+	// ledger is the committed context window; work is the open turn's copy,
+	// adopted when the turn closes and dropped if it never does.
+	ledger *Ledger
+	work   *Ledger
 }
 
 type toolRef struct {
 	name  string
 	class string
-}
-
-type turnState struct {
-	codastreCalls  int
-	codastreBytes  int64
-	codastreFailed bool
-	textCalls      int
-	textBytes      int64
-	readCalls      int
-	readBytes      int64
-	// fallback records that a text search or a file read happened *after* a
-	// codastre call in the same turn — the two-sided signal.
-	fallback bool
-
-	startedAt time.Time
-	endedAt   time.Time
+	// noMatchExit: the command's status comes from a search tool for which
+	// exit 1 means "nothing matched".
+	noMatchExit bool
 }
 
 func (p *parser) line(raw []byte) {
@@ -133,7 +145,27 @@ func (p *parser) line(raw []byte) {
 		p.assistant(rec)
 	case "user":
 		p.user(rec)
+	case "attachment":
+		if mode := searchMode(rec.Attachment); mode != ModeUnknown && p.turnOpen {
+			p.turn.mode = mode
+		}
 	}
+}
+
+// led is the ledger that the line being processed mutates.
+func (p *parser) led() *Ledger {
+	if p.turnOpen {
+		return p.work
+	}
+	return p.ledger
+}
+
+// episodeOrdinal is the open turn's absolute ordinal, or -1 outside a turn.
+func (p *parser) episodeOrdinal() int {
+	if !p.turnOpen {
+		return -1
+	}
+	return p.baseTurns + p.session.Turns
 }
 
 // target is where additive counters go: the open turn's buffer, or the
@@ -159,12 +191,22 @@ func (p *parser) costState(rec record) {
 		LinesAdded:     rec.TotalLinesAdded,
 		LinesRemoved:   rec.TotalLinesRemoved,
 	}
-	for _, m := range rec.ModelUsage {
+	for name, m := range rec.ModelUsage {
 		c.InputTokens += m.InputTokens
 		c.OutputTokens += m.OutputTokens
 		c.ThinkingTokens += m.ThinkingTokens
 		c.CacheReadTokens += m.CacheReadInputTokens
 		c.CacheCreationTokens += m.CacheCreationInputTokens
+		if c.Models == nil {
+			c.Models = map[string]ModelUsage{}
+		}
+		c.Models[name] = ModelUsage{
+			CostUSD:             m.CostUSD,
+			InputTokens:         m.InputTokens,
+			OutputTokens:        m.OutputTokens,
+			CacheReadTokens:     m.CacheReadInputTokens,
+			CacheCreationTokens: m.CacheCreationInputTokens,
+		}
 	}
 	p.session.Cost = c
 }
@@ -174,7 +216,7 @@ func (p *parser) assistant(rec record) {
 		return
 	}
 	p.touchTurn()
-	if u := rec.Message.Usage; u != nil {
+	if u := rec.Message.Usage; u != nil && p.firstSighting(rec.Message.ID) {
 		m := &p.target().Messages
 		m.Messages++
 		m.InputTokens += u.InputTokens
@@ -182,6 +224,15 @@ func (p *parser) assistant(rec record) {
 		m.ThinkingTokens += u.OutputTokensDetails.ThinkingTokens
 		m.CacheReadTokens += u.CacheReadInputTokens
 		m.CacheCreationTokens += u.CacheCreationInputTokens
+		// A subagent's requests run in their own context window; only the
+		// main thread's prompt is the one search results sit in.
+		if !rec.IsSidechain {
+			cw5, cw1 := cacheWriteSplit(u)
+			w := p.target().cacheWrites(rec.Message.Model)
+			w.Ephemeral5m += cw5
+			w.Ephemeral1h += cw1
+			p.led().request(rec.Message.Model, u, p.target())
+		}
 	}
 	for _, b := range blocks(rec.Message.Content) {
 		if b.Type != "tool_use" {
@@ -191,7 +242,14 @@ func (p *parser) assistant(rec record) {
 		if p.toolNames == nil {
 			p.toolNames = map[string]toolRef{}
 		}
-		p.toolNames[b.ID] = toolRef{name: b.Name, class: class}
+		p.toolNames[b.ID] = toolRef{
+			name:        b.Name,
+			class:       class,
+			noMatchExit: b.Name == "Bash" && exitsOneOnNoMatch(b.Input.Command),
+		}
+		if b.Name == "Bash" {
+			p.target().bash(class).Calls++
+		}
 		p.countCall(class)
 		p.target().tool(b.Name).Calls++
 		p.target().class(class).Calls++
@@ -206,7 +264,7 @@ func (p *parser) user(rec record) {
 			continue
 		}
 		results++
-		p.toolResult(b, rec.ToolUseResult)
+		p.toolResult(b, rec.ToolUseResult, rec.IsSidechain)
 	}
 	// A user record carrying tool results is the transcript's plumbing, not a
 	// human turn. A meta record (system reminders, hook output) is not one
@@ -217,7 +275,7 @@ func (p *parser) user(rec record) {
 	}
 }
 
-func (p *parser) toolResult(b contentBlock, fallbackPayload json.RawMessage) {
+func (p *parser) toolResult(b contentBlock, fallbackPayload json.RawMessage, sidechain bool) {
 	ref, known := p.toolNames[b.ToolUseID]
 	name := ref.name
 	if !known {
@@ -229,124 +287,58 @@ func (p *parser) toolResult(b contentBlock, fallbackPayload json.RawMessage) {
 	if size == 0 {
 		size = int64(len(fallbackPayload))
 	}
-	st := p.target().tool(name)
-	st.ResultBytes += size
-	cst := p.target().class(classOr(ref.class))
-	cst.ResultBytes += size
-	if b.IsError {
-		st.Errors++
-		cst.Errors++
+	failed := b.IsError
+	noMatch := failed && ref.noMatchExit && isExitOne(b.Content)
+	if noMatch {
+		failed = false
 	}
-	p.countBytes(ref.class, size, b.IsError)
+	shellErr := failed && isShellError(b.Content)
+	stats := []*ToolStat{p.target().tool(name), p.target().class(classOr(ref.class))}
+	if name == "Bash" {
+		stats = append(stats, p.target().bash(classOr(ref.class)))
+	}
+	for _, st := range stats {
+		st.ResultBytes += size
+		if failed {
+			st.Errors++
+		}
+		if shellErr {
+			st.ShellErrors++
+		}
+		if noMatch {
+			st.NoMatch++
+		}
+	}
+	p.countBytes(ref.class, size, failed)
+	if !sidechain {
+		episode := -1
+		if isSearchClass(ref.class) {
+			episode = p.episodeOrdinal()
+		}
+		p.led().result(classOr(ref.class), episode, size)
+	}
 	p.touchTurn()
 	delete(p.toolNames, b.ToolUseID)
 }
 
-// countCall records a call against the open turn, opening one if a tool ran
-// before any user record did (a resumed transcript starts mid-turn).
-func (p *parser) countCall(class string) {
-	if !p.turnOpen {
-		p.openTurn()
-	}
-	switch class {
-	case ClassCodastre:
-		p.turn.codastreCalls++
-	case ClassTextSearch:
-		p.turn.textCalls++
-		if p.turn.codastreCalls > 0 {
-			p.turn.fallback = true
-		}
-	case ClassRead:
-		p.turn.readCalls++
-		if p.turn.codastreCalls > 0 {
-			p.turn.fallback = true
-		}
-	}
+func isSearchClass(class string) bool {
+	return class == ClassCodastre || class == ClassTextSearch || class == ClassRead
 }
 
-func (p *parser) countBytes(class string, size int64, isErr bool) {
-	switch class {
-	case ClassCodastre:
-		p.turn.codastreBytes += size
-		if isErr {
-			p.turn.codastreFailed = true
-		}
-	case ClassTextSearch:
-		p.turn.textBytes += size
-	case ClassRead:
-		p.turn.readBytes += size
+// firstSighting reports whether an API message id is new to this parse. An
+// empty id (an older transcript) always counts.
+func (p *parser) firstSighting(id string) bool {
+	if id == "" {
+		return true
 	}
-}
-
-// touchTurn extends the open turn's end to the current line. Only assistant
-// and tool-result lines count: the prompt that opens the next turn must not
-// stretch the previous one.
-func (p *parser) touchTurn() {
-	if p.turnOpen && p.lineTS.After(p.turn.endedAt) {
-		p.turn.endedAt = p.lineTS
+	if p.seen == nil {
+		p.seen = map[string]bool{}
 	}
-}
-
-func (p *parser) openTurn() {
-	p.turnOpen = true
-	p.turn = turnState{startedAt: p.lineTS, endedAt: p.lineTS}
-	p.pending = newSession(p.session.SessionID)
-	p.pending.Turns = 1
-}
-
-// closeTurn books the open turn's outcome. A turn that ran no search at all is
-// `unclassified` and belongs in no rate — it is volume, not evidence.
-func (p *parser) closeTurn() {
-	if !p.turnOpen {
-		return
+	if p.seen[id] {
+		return false
 	}
-	t := p.turn
-	outcome := OutcomeUnclassified
-	switch {
-	case t.codastreFailed:
-		outcome = OutcomeCodastreFailed
-	case t.codastreCalls > 0 && t.fallback:
-		outcome = OutcomeFallbackAfter
-	case t.codastreCalls > 0:
-		outcome = OutcomeCodastreOnly
-	case t.textCalls > 0:
-		outcome = OutcomeTextSearchOnly
-	}
-	st := p.pending.episode(outcome)
-	st.Episodes++
-	st.CodastreCalls += t.codastreCalls
-	st.CodastreBytes += t.codastreBytes
-	st.TextSearchCalls += t.textCalls
-	st.TextSearchBytes += t.textBytes
-	st.ReadCalls += t.readCalls
-	st.ReadBytes += t.readBytes
-	if outcome != OutcomeUnclassified {
-		// Ordinal 0 within the one-turn increment; Merge rebases it onto the
-		// turns already counted.
-		p.pending.EpisodeLog = append(p.pending.EpisodeLog, Episode{
-			Outcome:         outcome,
-			StartedAt:       t.startedAt,
-			EndedAt:         t.endedAt,
-			CodastreCalls:   t.codastreCalls,
-			CodastreBytes:   t.codastreBytes,
-			TextSearchCalls: t.textCalls,
-			TextSearchBytes: t.textBytes,
-			ReadCalls:       t.readCalls,
-			ReadBytes:       t.readBytes,
-		})
-	}
-	p.turnOpen = false
-	p.closedHere = true
-	p.session.Merge(p.pending)
-	p.pending = nil
-}
-
-// abandonTurn drops an unfinished turn at EOF. Its counters stay uncommitted
-// and the resume offset points at its first line, so the next run replays it
-// whole.
-func (p *parser) abandonTurn() {
-	p.turnOpen = false
-	p.pending = nil
+	p.seen[id] = true
+	return true
 }
 
 // classOr names the bucket for a result whose call was never seen (a resumed

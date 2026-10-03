@@ -14,6 +14,19 @@ type ClassStat struct {
 	Calls       int    `json:"calls"`
 	ResultBytes int64  `json:"result_bytes"`
 	Errors      int    `json:"errors"`
+	ShellErrors int    `json:"shell_errors,omitempty"`
+	NoMatch     int    `json:"no_match,omitempty"`
+}
+
+// CostStat is one class's attributed tool-result cost over the window
+// (cost.go). USD sums only the sessions whose cost-state prices it, and
+// PricedSessions says how many that was.
+type CostStat struct {
+	Class          string  `json:"class"`
+	IngestTokens   int64   `json:"ingest_tokens"`
+	CarryTokens    int64   `json:"carry_tokens"`
+	USD            float64 `json:"usd"`
+	PricedSessions int     `json:"priced_sessions"`
 }
 
 // OutcomeStat is one outcome's row in the episode breakdown.
@@ -60,6 +73,9 @@ type Summary struct {
 	Classes  []ClassStat   `json:"classes"`
 	Tools    []ClassStat   `json:"tools"`
 	Outcomes []OutcomeStat `json:"outcomes"`
+	// ResultCost is the attributed cost of tool results by class — an
+	// attribution of the measured spend, not a second measurement of it.
+	ResultCost []CostStat `json:"result_cost,omitempty"`
 
 	// AnsweredWithoutFallback is codastre_only over every episode that made a
 	// codastre call. Denominator included, deliberately: a rate that hides its
@@ -75,8 +91,10 @@ type Summary struct {
 // CaveatText travels with every transcript figure. Unlike the JSONL log there
 // is no ±20% band — these are first-party counts — so the caveat names the
 // real limits instead: coverage, and the fact that byte totals are not tokens.
-const CaveatText = "Exact first-party counts from Claude Code transcripts (tokens and USD are " +
-	"measured, not estimated). Per-tool figures are result bytes, not tokens. " +
+const CaveatText = "Exact first-party counts from Claude Code transcripts (session tokens and USD are " +
+	"measured, not estimated). Per-tool figures are result bytes, not tokens. Tool-result cost " +
+	"is an attribution of the measured spend (prompt growth, price ratios), not a measurement; " +
+	"it excludes the output the model spent deciding what to call. " +
 	"Claude Code sessions only — other clients are invisible here and are never summed in."
 
 // Summarise folds collected sessions into the printable answer.
@@ -96,6 +114,7 @@ func Summarise(sessions []*Session, window, statePath string, since time.Time) S
 	byClass := map[string]*ClassStat{}
 	byTool := map[string]*ClassStat{}
 	byOutcome := map[string]*EpisodeStat{}
+	byCost := map[string]*CostStat{}
 
 	for _, sess := range sessions {
 		s.Turns += sess.Turns
@@ -124,6 +143,19 @@ func Summarise(sessions []*Session, window, statePath string, since time.Time) S
 		for class, st := range sess.ClassMix {
 			add(byClass, class, st)
 		}
+		for class, c := range sess.CostByClass {
+			dst := byCost[class]
+			if dst == nil {
+				dst = &CostStat{Class: class}
+				byCost[class] = dst
+			}
+			dst.IngestTokens += c.IngestTokens
+			dst.CarryTokens += c.CarryTokens
+			if c.USD != nil {
+				dst.USD += *c.USD
+				dst.PricedSessions++
+			}
+		}
 		for outcome, st := range sess.Episodes {
 			dst := byOutcome[outcome]
 			if dst == nil {
@@ -147,6 +179,15 @@ func Summarise(sessions []*Session, window, statePath string, since time.Time) S
 	}
 	s.Classes = flatten(byClass)
 	s.Tools = flatten(byTool)
+	for _, c := range byCost {
+		s.ResultCost = append(s.ResultCost, *c)
+	}
+	sort.Slice(s.ResultCost, func(i, j int) bool {
+		if s.ResultCost[i].USD != s.ResultCost[j].USD {
+			return s.ResultCost[i].USD > s.ResultCost[j].USD
+		}
+		return s.ResultCost[i].Class < s.ResultCost[j].Class
+	})
 
 	for _, outcome := range Outcomes {
 		st := byOutcome[outcome]
@@ -179,6 +220,8 @@ func add(m map[string]*ClassStat, key string, st *ToolStat) {
 	dst.Calls += st.Calls
 	dst.ResultBytes += st.ResultBytes
 	dst.Errors += st.Errors
+	dst.ShellErrors += st.ShellErrors
+	dst.NoMatch += st.NoMatch
 }
 
 func flatten(m map[string]*ClassStat) []ClassStat {

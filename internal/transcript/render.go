@@ -46,9 +46,29 @@ func Render(w io.Writer, s Summary) {
 		}
 	}
 
+	renderResultCost(w, s)
 	renderOutcomes(w, s)
 	fmt.Fprintf(w, "\n%s\n", wrap(s.Caveat, 88, "  "))
 	fmt.Fprintln(w, "No counterfactual is computed: this is what ran, not what it saved.")
+}
+
+// renderResultCost prints what tool results cost once ingested and while
+// carried, labelled as the attribution it is. Shares are of the measured
+// spend, so the reader can see what the rest of it was.
+func renderResultCost(w io.Writer, s Summary) {
+	if len(s.ResultCost) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nTool-result cost (attributed share of measured spend)")
+	for _, c := range s.ResultCost {
+		share := ""
+		if s.CostUSD > 0 {
+			share = fmt.Sprintf("%5.1f%%", c.USD/s.CostUSD*100)
+		}
+		fmt.Fprintf(w, "  %-14s $%8.2f %s   ingest %s · carried %s tokens\n",
+			c.Class, c.USD, share, thousands64(c.IngestTokens), thousands64(c.CarryTokens))
+	}
+	fmt.Fprintln(w, "  ingest = prompt growth when a result arrived; carried = re-read on every later request")
 }
 
 // renderOutcomes prints the rate with both failure rows and the excluded

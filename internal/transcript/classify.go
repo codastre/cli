@@ -86,10 +86,13 @@ var Outcomes = []string{
 	OutcomeUnclassified,
 }
 
-// OutcomeLabel is the human name for each outcome.
+// OutcomeLabel is the human name for each outcome. `fallback_after_codastre`
+// keeps its wire name but reads neutrally: the turn used both, and in auto
+// mode a text search after Codastre is the designed path (a literal string,
+// an unindexed file), not a failure. Failure is `codastre_failed`.
 var OutcomeLabel = map[string]string{
 	OutcomeCodastreOnly:   "codastre only",
-	OutcomeFallbackAfter:  "fallback after codastre",
+	OutcomeFallbackAfter:  "codastre + text search",
 	OutcomeCodastreFailed: "codastre failed",
 	OutcomeTextSearchOnly: "text search only",
 	OutcomeUnclassified:   "no search this turn",

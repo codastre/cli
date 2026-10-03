@@ -20,6 +20,11 @@ type Episode struct {
 	TextSearchBytes int64     `json:"text_search_bytes"`
 	ReadCalls       int       `json:"read_calls"`
 	ReadBytes       int64     `json:"read_bytes"`
+	// Mode is the search mode the plugin hook announced for this turn
+	// (ModeCodastre / ModeGrep / ModeAuto), empty when none was. It decides
+	// how an outcome reads: text search after Codastre is the designed path
+	// in auto mode and impossible in strict codastre mode. Local only.
+	Mode string `json:"mode,omitempty"`
 }
 
 // Compactions counts context compactions for one session, as observed by the

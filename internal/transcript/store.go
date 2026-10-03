@@ -10,8 +10,11 @@ import (
 
 // StateVersion guards the on-disk format. A bump discards the old state and
 // re-parses from scratch, which is always safe: the transcripts are the source
-// of truth and the state file is only a cache.
-const StateVersion = 2
+// of truth and the state file is only a cache. The consent boundary is the
+// one thing that is not derived from transcripts, so it survives a bump.
+//
+// v3: per-message-id usage dedup, no-match exits, search-cost attribution.
+const StateVersion = 3
 
 // FileMark is the per-file watermark: identity plus how far the parse got.
 // Identity is (inode, size) — a rotated or replaced file has a new inode, and
@@ -79,7 +82,11 @@ func LoadState(path string) *State {
 		return empty
 	}
 	var s State
-	if err := json.Unmarshal(blob, &s); err != nil || s.Version != StateVersion {
+	if err := json.Unmarshal(blob, &s); err != nil {
+		return empty
+	}
+	if s.Version != StateVersion {
+		empty.ReportSince = s.ReportSince
 		return empty
 	}
 	if s.Files == nil {

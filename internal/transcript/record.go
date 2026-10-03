@@ -29,9 +29,24 @@ type record struct {
 	// tool_use. Kept as raw JSON so its size is measured without its content
 	// being decoded into anything this process keeps.
 	ToolUseResult json.RawMessage `json:"toolUseResult"`
+
+	// attachment records; only the hook-context shape is read, and only to
+	// recover the search-mode enum (see searchMode).
+	Attachment *attachment `json:"attachment"`
+}
+
+type attachment struct {
+	Type      string   `json:"type"`
+	HookEvent string   `json:"hookEvent"`
+	Content   []string `json:"content"`
 }
 
 type message struct {
+	// ID is the API message id. Claude Code writes one transcript record per
+	// content block, each repeating the same usage — the id is what makes a
+	// request count once.
+	ID      string          `json:"id"`
+	Model   string          `json:"model"`
 	Role    string          `json:"role"`
 	Usage   *usage          `json:"usage"`
 	Content json.RawMessage `json:"content"`
@@ -42,17 +57,22 @@ type usage struct {
 	OutputTokens             int64 `json:"output_tokens"`
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-	OutputTokensDetails      struct {
+	CacheCreation            *struct {
+		Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
+		Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation"`
+	OutputTokensDetails struct {
 		ThinkingTokens int64 `json:"thinking_tokens"`
 	} `json:"output_tokens_details"`
 }
 
 type modelUsage struct {
-	InputTokens              int64 `json:"inputTokens"`
-	OutputTokens             int64 `json:"outputTokens"`
-	ThinkingTokens           int64 `json:"thinkingTokens"`
-	CacheReadInputTokens     int64 `json:"cacheReadInputTokens"`
-	CacheCreationInputTokens int64 `json:"cacheCreationInputTokens"`
+	InputTokens              int64   `json:"inputTokens"`
+	OutputTokens             int64   `json:"outputTokens"`
+	ThinkingTokens           int64   `json:"thinkingTokens"`
+	CacheReadInputTokens     int64   `json:"cacheReadInputTokens"`
+	CacheCreationInputTokens int64   `json:"cacheCreationInputTokens"`
+	CostUSD                  float64 `json:"costUSD"`
 }
 
 // contentBlock covers the three block shapes that matter: the tool_use that

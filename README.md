@@ -176,7 +176,7 @@ Context
 
 Search episodes (one per turn)
   codastre only                17 ←
-  fallback after codastre      47
+  codastre + text search       47
   codastre failed               3
   text search only            282
 

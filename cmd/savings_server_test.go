@@ -220,7 +220,7 @@ func TestSavingsServerRendersEpisodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("savings: %v\n%s", err, out)
 	}
-	for _, want := range []string{"Episodes — source: transcript", "fallback after codastre",
+	for _, want := range []string{"Episodes — source: transcript", "codastre + text search",
 		"codastre failed", "6 / 10 = 60.0%", "provenance: plane 3"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)

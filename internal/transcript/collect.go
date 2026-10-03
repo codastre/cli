@@ -56,7 +56,11 @@ func Collect(root string, state *State, limit int) (CollectResult, error) {
 			continue
 		}
 
-		inc, next, err := parseFrom(f.Path, mark.Offset)
+		var prev *Session
+		if mark.Offset > 0 {
+			prev = state.Sessions[mark.SessionID]
+		}
+		inc, next, err := parseFrom(f.Path, mark.Offset, prev)
 		if err != nil {
 			res.FilesFailed++
 			continue
@@ -94,11 +98,12 @@ func Collect(root string, state *State, limit int) (CollectResult, error) {
 	res.Sessions = len(state.Sessions)
 	for _, s := range state.Sessions {
 		res.Turns += s.Turns
+		s.Finalize()
 	}
 	return res, nil
 }
 
-func parseFrom(path string, offset int64) (*Session, int64, error) {
+func parseFrom(path string, offset int64, prev *Session) (*Session, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, 0, err
@@ -109,5 +114,5 @@ func parseFrom(path string, offset int64) (*Session, int64, error) {
 			return nil, 0, err
 		}
 	}
-	return Parse(f, offset)
+	return ParseFrom(f, offset, prev)
 }

@@ -145,7 +145,7 @@ func renderServerEpisodes(w io.Writer, e ServerEpisodes) {
 	fmt.Fprintf(w, "  %-26s %s\n", "episodes", thousands(e.Total))
 	fmt.Fprintf(w, "  %-26s %s\n", "with a codastre call", thousands(denom))
 	fmt.Fprintf(w, "  ├─ %-23s %s   ← numerator\n", "codastre only", thousands(e.CodastreOnly))
-	fmt.Fprintf(w, "  ├─ %-23s %s\n", "fallback after codastre", thousands(e.FallbackAfterCodastre))
+	fmt.Fprintf(w, "  ├─ %-23s %s\n", "codastre + text search", thousands(e.FallbackAfterCodastre))
 	fmt.Fprintf(w, "  └─ %-23s %s\n", "codastre failed", thousands(e.CodastreFailed))
 	fmt.Fprintf(w, "  %-26s %s\n", "text search only", thousands(e.TextSearchOnly))
 	fmt.Fprintf(w, "  %-26s %s   (in no rate)\n", "unclassified", thousands(e.Unclassified))
