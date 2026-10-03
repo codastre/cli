@@ -246,7 +246,7 @@ under its pre-registered prompt.
 
 The strongest measurement codastre has: the same pre-registered task run once with
 the tool and once without, both sessions measured exactly from their transcripts.
-End-to-end walkthrough (design, registration, runs, judging): [paired study guide](../docs/ab-testing-paired-study-guide.md).
+End-to-end walkthrough (design, registration, runs, judging): [A/B testing guide (paired studies)](../docs/ab-testing-paired-study-guide.md).
 
 ```bash
 codastre study list                       # open studies and their tasks (prompt hashes)
