@@ -137,6 +137,8 @@ Run `codastre <command> --help` for flags and details.
 
 ## 📊 What it cost you — `codastre collect` + `codastre savings`
 
+For the complete developer and admin metrics walkthrough, see the [usage metrics guide](../docs/usage-metrics-guide.md).
+
 ```bash
 codastre collect              # parse the transcripts already on this machine
 codastre savings              # last 30 days
@@ -244,6 +246,7 @@ under its pre-registered prompt.
 
 The strongest measurement codastre has: the same pre-registered task run once with
 the tool and once without, both sessions measured exactly from their transcripts.
+End-to-end walkthrough (design, registration, runs, judging): [paired study guide](../docs/ab-testing-paired-study-guide.md).
 
 ```bash
 codastre study list                       # open studies and their tasks (prompt hashes)
