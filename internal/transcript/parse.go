@@ -66,6 +66,8 @@ func ParseFrom(r io.Reader, offset int64, prev *Session) (*Session, int64, error
 		}
 	}
 	p.abandonTurn()
+	s.usageAfterCost = p.usageAfterCost
+	s.Cost.Stale = s.Cost.Present && p.usageAfterCost
 	return s, p.commit, nil
 }
 
@@ -99,6 +101,9 @@ type parser struct {
 	// adopted when the turn closes and dropped if it never does.
 	ledger *Ledger
 	work   *Ledger
+	// usageAfterCost: an API request was seen after the last cost-state
+	// record (or with none yet), so that snapshot undercounts the session.
+	usageAfterCost bool
 }
 
 type toolRef struct {
@@ -209,6 +214,7 @@ func (p *parser) costState(rec record) {
 		}
 	}
 	p.session.Cost = c
+	p.usageAfterCost = false
 }
 
 func (p *parser) assistant(rec record) {
@@ -217,6 +223,7 @@ func (p *parser) assistant(rec record) {
 	}
 	p.touchTurn()
 	if u := rec.Message.Usage; u != nil && p.firstSighting(rec.Message.ID) {
+		p.usageAfterCost = true
 		m := &p.target().Messages
 		m.Messages++
 		m.InputTokens += u.InputTokens

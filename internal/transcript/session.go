@@ -33,8 +33,15 @@ func (t *ToolStat) add(o *ToolStat) {
 //
 // CostUSD is measured — it is Claude Code's own figure, already priced with
 // the cache discount. No pricing constant exists anywhere in this design.
+//
+// Claude Code writes one whenever its process exits, so a session that was
+// restarted and is still running carries an early snapshot followed by more
+// requests. Stale marks that: the snapshot is real but no longer the
+// session's total, and nothing may use it as a denominator until the next
+// one arrives. Its per-model prices (Finalize) are still valid.
 type CostState struct {
 	Present             bool    `json:"present"`
+	Stale               bool    `json:"stale,omitempty"`
 	CostUSD             float64 `json:"cost_usd"`
 	DurationMS          int64   `json:"duration_ms"`
 	APIDurationMS       int64   `json:"api_duration_ms"`
@@ -120,6 +127,11 @@ type Session struct {
 	EpisodeLog []Episode `json:"episode_log,omitempty"`
 	// Upload is what has already been reported to the server.
 	Upload UploadMark `json:"upload"`
+
+	// usageAfterCost records that this increment saw an API request after
+	// its last cost-state (or saw one and no cost-state at all), which makes
+	// the merged snapshot stale. Parse-time only; never persisted.
+	usageAfterCost bool
 }
 
 // SourceTranscript is the `source` value every session parsed here carries.
@@ -248,6 +260,8 @@ func (s *Session) Merge(inc *Session) {
 	}
 	if inc.Cost.Present {
 		s.Cost = inc.Cost
+	} else if inc.usageAfterCost && s.Cost.Present {
+		s.Cost.Stale = true
 	}
 
 	s.Messages.Messages += inc.Messages.Messages
