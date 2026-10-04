@@ -14,7 +14,9 @@ import (
 // one thing that is not derived from transcripts, so it survives a bump.
 //
 // v3: per-message-id usage dedup, no-match exits, search-cost attribution.
-const StateVersion = 3
+// v4: structural Bash classification (pipeline.go) — piped output filters
+// are not searches, shell file reads are reads — and stale cost-states.
+const StateVersion = 4
 
 // FileMark is the per-file watermark: identity plus how far the parse got.
 // Identity is (inode, size) — a rotated or replaced file has a new inode, and

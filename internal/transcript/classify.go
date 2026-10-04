@@ -31,14 +31,11 @@ const (
 
 // These mirror lib.js verbatim. A divergence would make the two sources
 // disagree about what a "text search" is, which is worse than either
-// definition being wrong.
+// definition being wrong. Search and read detection for Bash is structural,
+// not a regex: see pipeline.go.
 var (
 	codastreTool = regexp.MustCompile(`(?i)codastre.*__(QUERY|GRAPH|CORPUS_SEARCH|CONTRACTS|REGISTER|SYNC)$`)
 	codastreCLI  = regexp.MustCompile("(?i)(?:^|[|;&(`]\\s*)(?:[^\\s|;&()`]*[/\\\\])?codastre(?:\\.exe)?\\s+(query|graph|corpora|corpus|contracts)\\b")
-	bashSearch   = regexp.MustCompile("(?i)" + `(?:^|[|;&(` + "`" + `]\s*)(?:grep|rg|ag|ack|fd|findstr)\b` +
-		`|\bgit\s+grep\b` +
-		`|\bxargs\b[^|;&]*\bgrep\b` +
-		`|(?:^|[|;&(` + "`" + `]\s*)find\s+[^|;&]*-name\b`)
 )
 
 // Classify maps a tool call to its class and, for codastre, its plane.
@@ -57,8 +54,13 @@ func Classify(toolName, bashCommand string) (class, plane string) {
 		if codastreCLI.MatchString(masked) {
 			return ClassCodastre, PlaneCLI
 		}
-		if bashSearch.MatchString(masked) {
+		if hasSearch(masked) {
 			return ClassTextSearch, ""
+		}
+		// A file printed through the shell is what the Read tool would
+		// have done; a command that also searches stays a search.
+		if hasRead(masked) {
+			return ClassRead, ""
 		}
 		return ClassOther, ""
 	case toolName == "Read" || toolName == "NotebookRead":
