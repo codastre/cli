@@ -20,9 +20,20 @@ import (
 // case; these budgets address the ordinary one.
 const (
 	// defaultMaxSnippetLines caps a normal result. Measured healthy chunks span
-	// 7-72 lines (p50 25), so 80 is above the working range and only bites spans
-	// that were never going to be read in full anyway.
-	defaultMaxSnippetLines = 80
+	// 7-72 lines (p50 25). It was 80 — above the working range — until
+	// transcript analysis showed agents rarely Read a hit after seeing it, so a
+	// body's tail was mostly paid for and never used. 20 keeps the signature and
+	// the first screen of logic; a truncated body says where the rest is, and
+	// $CODASTRE_MAX_SNIPPET_LINES / --max-snippet-lines restore the old budget.
+	defaultMaxSnippetLines = 20
+
+	// defaultSnippetsTop is how many of the top-ranked hits get a body. Lookup
+	// answers come from ranks 1-3 (cmd/query.go, --top-k), so bodies for ranks
+	// 4+ are mostly cost — and, when the ranking is wrong, context pollution.
+	// Lower hits keep their location, so a miss in the top 3 is still one Read
+	// away. $CODASTRE_SNIPPETS_TOP / --snippets-top / per-call snippets_top
+	// override it; a negative value hydrates every hit.
+	defaultSnippetsTop = 3
 
 	// maxSnippetLineChars bounds a single line. A line budget alone does not
 	// bound a snippet: minified and one-line-JSON artifacts put the whole file on
@@ -123,6 +134,28 @@ func (cfg Config) snippetLineBudget(realPath, pathClass string) int {
 		}
 	}
 	return limit
+}
+
+// hydratesRank reports whether the hit at 0-based rank gets a body.
+// SnippetsTop > 0 is the count, 0 means defaultSnippetsTop, negative means all.
+func (cfg Config) hydratesRank(rank int) bool {
+	top := cfg.SnippetsTop
+	if top == 0 {
+		top = defaultSnippetsTop
+	}
+	return top < 0 || rank < top
+}
+
+// hydratedTop returns how many leading results were eligible for a body when
+// a SnippetsTop cut applied to this response, or -1 when none was cut. The
+// renderer states it once in the header instead of once per unhydrated hit.
+func hydratedTop(results []renderResult) int {
+	for i, r := range results {
+		if r.Hydration == hydrationBeyondSnippetsTop {
+			return i
+		}
+	}
+	return -1
 }
 
 // clipRunes truncates s to at most n bytes without splitting a rune. Cutting

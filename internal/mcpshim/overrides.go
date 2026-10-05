@@ -18,6 +18,9 @@ const (
 	argMaxSnippetLines = "max_snippet_lines"
 	// argSnippets (bool) turns hydration off for this call when false.
 	argSnippets = "snippets"
+	// argSnippetsTop (int) hydrates only this call's N best-ranked hits;
+	// negative → all.
+	argSnippetsTop = "snippets_top"
 	// argFormat is shared with the server, which is why it is handled differently
 	// from the two above: it is REWRITTEN rather than stripped. The three values
 	// form one ladder of increasing compaction, on both QUERY and GRAPH —
@@ -76,11 +79,12 @@ const formatJSON = "json"
 type callOverrides struct {
 	maxSnippetLines *int
 	snippets        *bool
+	snippetsTop     *int
 	format          *string
 }
 
 func (o callOverrides) empty() bool {
-	return o.maxSnippetLines == nil && o.snippets == nil && o.format == nil
+	return o.maxSnippetLines == nil && o.snippets == nil && o.snippetsTop == nil && o.format == nil
 }
 
 // apply returns a copy of cfg with this call's overrides folded in.
@@ -107,6 +111,15 @@ func (o callOverrides) apply(cfg Config) Config {
 			cfg.NoSnippets = true
 		} else {
 			cfg.MaxSnippetLines = n
+		}
+	}
+	if o.snippetsTop != nil {
+		switch n := *o.snippetsTop; {
+		case n == 0:
+			// Same reading as max_snippet_lines: "zero hits get a body".
+			cfg.NoSnippets = true
+		default:
+			cfg.SnippetsTop = n
 		}
 	}
 	return cfg
@@ -158,6 +171,14 @@ func takeCallOverrides(cfg Config, body []byte) ([]byte, callOverrides) {
 			out.snippets = &b
 		}
 		delete(args, argSnippets)
+		stripped = true
+	}
+	if raw, ok := args[argSnippetsTop]; ok {
+		var n int
+		if err := json.Unmarshal(raw, &n); err == nil {
+			out.snippetsTop = &n
+		}
+		delete(args, argSnippetsTop)
 		stripped = true
 	}
 	// QUERY and GRAPH only: they are the tools that declare `format`, and

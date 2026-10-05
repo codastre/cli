@@ -52,6 +52,10 @@ type Config struct {
 	// Zero → defaultMaxSnippetLines. Hydration is where a QUERY response's cost
 	// is incurred, so this is the proxy's cost dial; see snippet.go.
 	MaxSnippetLines int
+	// SnippetsTop hydrates only the N best-ranked results; the rest keep their
+	// location and carry hydration="beyond_snippets_top". Zero →
+	// defaultSnippetsTop, negative → every result. See snippet.go.
+	SnippetsTop int
 	// NoSnippets skips hydration entirely, returning ranked locations only. For
 	// cheap orientation queries where the paths are the answer.
 	NoSnippets bool
@@ -93,6 +97,9 @@ const (
 	// failure: the paths and spans are complete and the agent should Read what it
 	// needs rather than trying to repair anything.
 	hydrationSnippetsDisabled = "snippets_disabled"
+	// Ranked below SnippetsTop. Also a choice, not a failure: the hit is a
+	// location to Read if the hydrated ones above it miss.
+	hydrationBeyondSnippetsTop = "beyond_snippets_top"
 )
 
 // HydrationSnippetsDisabled is hydrationSnippetsDisabled for callers outside this
@@ -100,6 +107,10 @@ const (
 // rendering does: it is the one reason the header already stated, so repeating it
 // per hit restates the mode instead of saying anything.
 const HydrationSnippetsDisabled = hydrationSnippetsDisabled
+
+// HydrationBeyondSnippetsTop is hydrationBeyondSnippetsTop for the same callers,
+// for the same reason: the header states the top-N mode.
+const HydrationBeyondSnippetsTop = hydrationBeyondSnippetsTop
 
 // canEnrich reports whether the proxy has any way to produce real paths /
 // snippets: an unmasker (hmac repos) or scheme knowledge (cleartext repos).

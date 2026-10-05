@@ -31,9 +31,35 @@ func defaultServerURL() string {
 
 // defaultMaxSnippetLines reads $CODASTRE_MAX_SNIPPET_LINES. 0 (or an
 // unparseable value) means "use the proxy's built-in budget".
+//
+// Unset falls back to hydration.max_snippet_lines in ~/.config/codastre/config.json,
+// the machine-wide default shared with other Codastre clients.
 func defaultMaxSnippetLines() int {
-	n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("CODASTRE_MAX_SNIPPET_LINES")))
+	v := strings.TrimSpace(os.Getenv("CODASTRE_MAX_SNIPPET_LINES"))
+	if v == "" {
+		return max(config.HydrationDefaults().MaxSnippetLines, 0)
+	}
+	n, err := strconv.Atoi(v)
 	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// defaultSnippetsTop reads $CODASTRE_SNIPPETS_TOP: how many top-ranked hits get
+// a body. 0 (or unparseable) means "use the built-in count"; "all" or a
+// negative number hydrates every hit. Unset falls back to
+// hydration.snippets_top in ~/.config/codastre/config.json.
+func defaultSnippetsTop() int {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("CODASTRE_SNIPPETS_TOP")))
+	if v == "" {
+		return config.HydrationDefaults().SnippetsTop
+	}
+	if v == "all" {
+		return -1
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
 		return 0
 	}
 	return n

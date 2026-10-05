@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -44,10 +46,53 @@ func TestCodexStdioSection_QuotesEachArg(t *testing.T) {
 	}
 }
 
+func TestSnippetsTopEnvDefault(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no config file: env or built-in only
+	for _, tc := range []struct {
+		env  string
+		want int
+	}{
+		{"", 0}, {"5", 5}, {" 1 ", 1}, {"all", -1}, {"ALL", -1}, {"-1", -1}, {"three", 0},
+	} {
+		t.Setenv("CODASTRE_SNIPPETS_TOP", tc.env)
+		if got := defaultSnippetsTop(); got != tc.want {
+			t.Errorf("CODASTRE_SNIPPETS_TOP=%q → %d, want %d", tc.env, got, tc.want)
+		}
+	}
+}
+
+// Unset env falls back to the shared config file; a set env var beats it.
+func TestSnippetDefaultsFallBackToConfigFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".config", "codastre")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"hydration": {"snippets_top": 5, "max_snippet_lines": 40}}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODASTRE_SNIPPETS_TOP", "")
+	t.Setenv("CODASTRE_MAX_SNIPPET_LINES", "")
+	if got := defaultSnippetsTop(); got != 5 {
+		t.Errorf("snippets_top from file = %d, want 5", got)
+	}
+	if got := defaultMaxSnippetLines(); got != 40 {
+		t.Errorf("max_snippet_lines from file = %d, want 40", got)
+	}
+	t.Setenv("CODASTRE_SNIPPETS_TOP", "all")
+	t.Setenv("CODASTRE_MAX_SNIPPET_LINES", "12")
+	if defaultSnippetsTop() != -1 || defaultMaxSnippetLines() != 12 {
+		t.Error("env var must beat the config file")
+	}
+}
+
 // The env vars exist for the case the flags can't reach: a plugin that ships a
 // fixed `.mcp.json` running bare `codastre serve`, vendored from upstream and
 // not ours to edit. Without them that setup has no operator-level lever at all.
 func TestSnippetEnvDefaults(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	if got := defaultMaxSnippetLines(); got != 0 {
 		t.Errorf("unset CODASTRE_MAX_SNIPPET_LINES → %d, want 0 (built-in default)", got)
 	}

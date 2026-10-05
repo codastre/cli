@@ -95,12 +95,13 @@ func TestHydration_CapsSnippetLinesAndMarksTruncation(t *testing.T) {
 // A span that fits the budget is delivered whole and NOT marked truncated —
 // the marker has to mean something.
 func TestHydration_ShortSpanIsNotMarkedTruncated(t *testing.T) {
-	cfg, payload := bigFileResponse(t, "app/models/small.rb", 500, 30, "app")
+	span := defaultMaxSnippetLines - 5
+	cfg, payload := bigFileResponse(t, "app/models/small.rb", 500, span, "app")
 
 	r := firstResult(t, enrichQueryResponse(cfg, payload))
 
-	if got := snippetLines(t, r); got != 30 {
-		t.Errorf("snippet has %d lines, want 30 (the whole span)", got)
+	if got := snippetLines(t, r); got != span {
+		t.Errorf("snippet has %d lines, want %d (the whole span)", got, span)
 	}
 	if _, ok := r["snippet_truncated"]; ok {
 		t.Error("an untrimmed snippet must not be marked snippet_truncated")
@@ -209,7 +210,8 @@ func TestHydration_ReportsPayloadCostToLog(t *testing.T) {
 	enrichQueryResponse(cfg, payload)
 
 	line := log.String()
-	for _, want := range []string{"1 results", "1 hydrated", "80 lines", "tokens", "1 truncated"} {
+	budget := fmt.Sprintf("%d lines", defaultMaxSnippetLines)
+	for _, want := range []string{"1 results", "1 hydrated", budget, "tokens", "1 truncated"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("cost line %q missing %q", strings.TrimSpace(line), want)
 		}

@@ -70,7 +70,7 @@ func enrichQueryPayload(cfg Config, data []byte) ([]byte, int, payloadAccount) {
 	}
 
 	for i, r := range results {
-		results[i] = enrichQueryResult(cfg, r, maskKeyRev, maskKeyRevs, &acct)
+		results[i] = enrichQueryResult(cfg, r, i, maskKeyRev, maskKeyRevs, &acct)
 	}
 
 	enriched, _ := json.Marshal(results)
@@ -87,6 +87,7 @@ func enrichQueryPayload(cfg Config, data []byte) ([]byte, int, payloadAccount) {
 func enrichQueryResult(
 	cfg Config,
 	r map[string]json.RawMessage,
+	rank int,
 	maskKeyRev int,
 	maskKeyRevs map[string]int,
 	acct *payloadAccount,
@@ -114,6 +115,11 @@ func enrichQueryResult(
 	// agent from reading the absence as a hydration failure it should fix.
 	if cfg.NoSnippets {
 		r["hydration"], _ = json.Marshal(hydrationSnippetsDisabled)
+		return r
+	}
+	// Results arrive in rank order, so the slice index is the rank.
+	if !cfg.hydratesRank(rank) {
+		r["hydration"], _ = json.Marshal(hydrationBeyondSnippetsTop)
 		return r
 	}
 

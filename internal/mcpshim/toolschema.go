@@ -7,7 +7,7 @@ import (
 
 // Advertising the client-only hydration arguments.
 //
-// `snippets` and `max_snippet_lines` are implemented HERE, in the proxy (see
+// `snippets`, `max_snippet_lines` and `snippets_top` are implemented HERE, in the proxy (see
 // overrides.go) — the server never sees them and could not honour them, since it
 // never holds the source. That left them undiscoverable: an agent reads the QUERY
 // tool schema the server publishes, and a parameter absent from that schema does
@@ -37,6 +37,12 @@ const (
 	maxSnippetLinesArgDescription = "Cap each snippet at this many lines for this " +
 		"call. Lower it to widen top_k without paying for full bodies; 0 is " +
 		"equivalent to snippets=false. Handled locally by the codastre CLI proxy."
+
+	snippetsTopArgDescription = "Hydrate only the N best-ranked hits for this " +
+		"call (default 3); lower hits keep path + line span and carry " +
+		"hydration=\"beyond_snippets_top\". Raise it when the top hits miss, " +
+		"-1 hydrates every hit, 0 is equivalent to snippets=false. Handled " +
+		"locally by the codastre CLI proxy."
 
 	// formatAgentNote extends the server's own `format` description rather than
 	// replacing it: verbose and compact are the server's values and it documents
@@ -257,6 +263,11 @@ func withQueryArgs(schemaRaw json.RawMessage, hydration bool) (json.RawMessage, 
 				"type":        "integer",
 				"minimum":     0,
 				"description": maxSnippetLinesArgDescription,
+			},
+			argSnippetsTop: map[string]any{
+				"type":        "integer",
+				"minimum":     -1,
+				"description": snippetsTopArgDescription,
 			},
 		} {
 			if _, exists := props[name]; exists {

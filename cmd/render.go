@@ -117,6 +117,8 @@ func renderQueryHuman(
 		// Names the flag, because this is the default state: hydration is
 		// otherwise invisible, and a feature nobody can find is not a feature.
 		fmt.Fprint(w, " · locations only (--snippets for bodies)")
+	} else if n := hydratedTop(env.Results); n >= 0 {
+		fmt.Fprintf(w, " · bodies for the top %d (--snippets-top for more)", n)
 	}
 	fmt.Fprintln(w)
 	if env.SyncJobID != nil && *env.SyncJobID != "" {
@@ -163,6 +165,17 @@ func renderQueryHuman(
 	return nil
 }
 
+// hydratedTop mirrors the agent renderer's: how many leading hits were eligible
+// for a body under a --snippets-top cut, or -1 when nothing was cut.
+func hydratedTop(results []queryResult) int {
+	for i, r := range results {
+		if r.Hydration == mcpshim.HydrationBeyondSnippetsTop {
+			return i
+		}
+	}
+	return -1
+}
+
 // restOfBody names the lines a truncated body left behind. A budget that stops
 // one line short of the span is common enough that "lines 840-840" would be a
 // regular sight, and it reads as a mistake — so the singular case carries its
@@ -205,7 +218,8 @@ func writeHumanSnippet(w io.Writer, r queryResult, noSnippets bool) bool {
 	}
 	// Every reason except the one the header already gave — repeating "snippets
 	// off" under each hit restates the mode instead of saying anything.
-	if r.Hydration != "" && !(noSnippets && r.Hydration == mcpshim.HydrationSnippetsDisabled) {
+	if r.Hydration != "" && !(noSnippets && r.Hydration == mcpshim.HydrationSnippetsDisabled) &&
+		r.Hydration != mcpshim.HydrationBeyondSnippetsTop {
 		fmt.Fprintf(w, "%sno body: %s\n", humanSnippetIndent, r.Hydration)
 	}
 	return false

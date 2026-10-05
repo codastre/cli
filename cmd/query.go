@@ -49,7 +49,8 @@ Reading the output:
     --no-unmask to skip it, or --json for the raw envelope (always masked).
   • output is ranked locations by default. --snippets additionally reads each
     hit's body from your local checkout and prints it under the location with
-    real file line numbers; --max-snippet-lines N caps long ones. The server
+    real file line numbers — for the top 3 hits only (--snippets-top N, -1 for
+    all); --max-snippet-lines N caps long ones (default 20). The server
     never sends source — it only says where to look — so a hit from a repo you
     have no clone of shows a short reason instead of a body. --json is never
     hydrated.
@@ -93,6 +94,7 @@ var (
 	queryRepoPath        string
 	querySnippets        bool
 	queryMaxSnippetLines int
+	querySnippetsTop     int
 	queryCorpora         bool
 )
 
@@ -130,6 +132,9 @@ func init() {
 	f.IntVar(&queryMaxSnippetLines, "max-snippet-lines", defaultMaxSnippetLines(),
 		"With --snippets, cap each body at N lines; truncated ones say where the "+
 			"rest is (0 = built-in default) [$CODASTRE_MAX_SNIPPET_LINES]")
+	f.IntVar(&querySnippetsTop, "snippets-top", defaultSnippetsTop(),
+		"With --snippets, hydrate only the N best-ranked hits; the rest stay "+
+			"locations (0 = built-in default, -1 = all) [$CODASTRE_SNIPPETS_TOP]")
 	// Discovery-shaped alias. It lives on `query` because that is the command a
 	// caller reaches for first, and the whole failure this addresses is not
 	// knowing that chunk ranking was the wrong unit for the question being
@@ -167,7 +172,7 @@ func corporaFlagConflicts(changed func(string) bool) (errs []string, warns []str
 		}
 	}
 	// Presentation only: a corpus answer is locations, never bodies.
-	for _, f := range []string{"snippets", "max-snippet-lines"} {
+	for _, f := range []string{"snippets", "max-snippet-lines", "snippets-top"} {
 		if changed(f) {
 			warns = append(warns, "--"+f)
 		}
@@ -341,6 +346,7 @@ func hydrateQuery(
 		RepoRootFor:     hy.RootFor,
 		CWDRepoID:       hy.CWDRepoID,
 		MaxSnippetLines: queryMaxSnippetLines,
+		SnippetsTop:     querySnippetsTop,
 	}, payload)
 }
 

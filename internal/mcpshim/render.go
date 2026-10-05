@@ -257,6 +257,8 @@ func writeHeader(b *strings.Builder, env renderEnvelope, noSnippets bool) {
 	mode := "snippets:on"
 	if noSnippets {
 		mode = "snippets:off"
+	} else if n := hydratedTop(env.Results); n >= 0 {
+		mode = fmt.Sprintf("snippets:top %d", n)
 	}
 	fmt.Fprintf(b, "codastre · %d hits · %d repo(s) searched · %s · %s\n",
 		len(env.Results), env.searchedCount(), env.Freshness, mode)
@@ -342,7 +344,8 @@ func hitTags(r renderResult, noSnippets bool) []string {
 	// "snippets_disabled" on every hit of a snippets:off response spends ~28 B a
 	// line restating the mode. The other reasons vary per hit and are the whole
 	// point of the field — they say what to fix.
-	if r.Hydration != "" && !(noSnippets && r.Hydration == hydrationSnippetsDisabled) {
+	if r.Hydration != "" && !(noSnippets && r.Hydration == hydrationSnippetsDisabled) &&
+		r.Hydration != hydrationBeyondSnippetsTop {
 		tags = append(tags, "no body: "+r.Hydration)
 	}
 	// The exact GRAPH seed, carried only where it is the sole one: no symbol to

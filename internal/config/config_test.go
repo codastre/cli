@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -58,5 +59,46 @@ func TestLoadTolerantOfGarbage(t *testing.T) {
 	}
 	if _, ok := ServerURL(); ok {
 		t.Fatal("garbage config should yield no server URL, not a value")
+	}
+}
+
+func writeConfig(t *testing.T, body string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".config", "codastre")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestHydrationDefaults(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if got := HydrationDefaults(); got != (Hydration{}) {
+		t.Fatalf("no config → %+v, want zero", got)
+	}
+	writeConfig(t, `{"hydration": {"snippets_top": -1, "max_snippet_lines": 40}}`)
+	if got := HydrationDefaults(); got != (Hydration{SnippetsTop: -1, MaxSnippetLines: 40}) {
+		t.Fatalf("HydrationDefaults = %+v, want {-1 40}", got)
+	}
+}
+
+// The file is shared with other Codastre clients (the companion app); a CLI
+// write must not drop keys it does not model.
+func TestSetServerURLPreservesUnknownKeys(t *testing.T) {
+	p := writeConfig(t, `{"hydration": {"snippets_top": 5}, "companion": {"theme": "dark"}}`)
+	if err := SetServerURL("https://srv"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	for _, want := range []string{`"companion"`, `"theme": "dark"`, `"snippets_top": 5`, `"server_url": "https://srv"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("config lost %s after SetServerURL:\n%s", want, b)
+		}
 	}
 }

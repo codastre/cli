@@ -21,6 +21,7 @@ var serveCmd = &cobra.Command{
 var serveNoWatch bool
 var serveServerURL string
 var serveMaxSnippetLines int
+var serveSnippetsTop int
 var serveNoSnippets bool
 var serveFormat string
 var serveQuiet bool
@@ -31,6 +32,9 @@ func init() {
 	serveCmd.Flags().IntVar(&serveMaxSnippetLines, "max-snippet-lines", defaultMaxSnippetLines(),
 		"Cap each hydrated snippet at N lines; truncated results are marked "+
 			"(0 = built-in default) [$CODASTRE_MAX_SNIPPET_LINES]")
+	serveCmd.Flags().IntVar(&serveSnippetsTop, "snippets-top", defaultSnippetsTop(),
+		"Hydrate only the N best-ranked QUERY hits; the rest stay locations "+
+			"(0 = built-in default, -1 = all) [$CODASTRE_SNIPPETS_TOP]")
 	serveCmd.Flags().BoolVar(&serveNoSnippets, "no-snippets", defaultNoSnippets(),
 		"Return ranked locations only, without hydrating snippet bodies [$CODASTRE_NO_SNIPPETS]")
 	serveCmd.Flags().StringVar(&serveFormat, "format", defaultQueryFormat(),
@@ -92,6 +96,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		RepoRemoteURL:   hy.RemoteURL,
 		CWDRepoID:       hy.CWDRepoID,
 		MaxSnippetLines: serveMaxSnippetLines,
+		SnippetsTop:     serveSnippetsTop,
 		NoSnippets:      serveNoSnippets,
 		Format:          serveFormat,
 		Log:             costLog,
