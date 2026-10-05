@@ -31,7 +31,8 @@ overrides). 'codastre savings' reads the result.
 The parse happens locally and only locally. A transcript holds prompts, source
 code, file paths and full tool output; none of that is stored, printed or sent
 anywhere by this command. What lands in the state file is counts, byte totals
-and timestamps — nothing else.
+and timestamps, plus the session's title (Claude Code's generated one or your
+/rename) and linked PR number for local display — never uploaded.
 
 Upload is opt-in twice: it needs CODASTRE_USAGE_REPORT=1 *and* --upload. It
 sends counters only — per-turn episode outcomes and per-session totals, with

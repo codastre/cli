@@ -151,6 +151,8 @@ func (p *parser) line(raw []byte) {
 		p.assistant(rec)
 	case "user":
 		p.user(rec)
+	case "ai-title", "custom-title", "pr-link":
+		s.label(rec)
 	case "attachment":
 		if mode := searchMode(rec.Attachment); mode != ModeUnknown && p.turnOpen {
 			p.turn.mode = mode

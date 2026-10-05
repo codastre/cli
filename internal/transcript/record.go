@@ -25,6 +25,12 @@ type record struct {
 	TotalLinesRemoved int                   `json:"totalLinesRemoved"`
 	ModelUsage        map[string]modelUsage `json:"modelUsage"`
 
+	// ai-title / custom-title / pr-link: the labels Claude Code shows in its
+	// resume picker. Local display only — no upload row has a field for them.
+	AITitle     string `json:"aiTitle"`
+	CustomTitle string `json:"customTitle"`
+	PRNumber    int    `json:"prNumber"`
+
 	// The tool result payload, present on the user record that answers a
 	// tool_use. Kept as raw JSON so its size is measured without its content
 	// being decoded into anything this process keeps.

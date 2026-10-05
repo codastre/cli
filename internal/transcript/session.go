@@ -90,17 +90,23 @@ type EpisodeStat struct {
 // "transcript" here; the field exists because the design forbids summing
 // across sources and a row must say which world it came from.
 type Session struct {
-	SessionID     string               `json:"session_id"`
-	Project       string               `json:"project"`
-	Cwd           string               `json:"cwd"`
-	GitBranch     string               `json:"git_branch"`
-	ClientVersion string               `json:"client_version"`
-	Source        string               `json:"source"`
-	StartedAt     time.Time            `json:"started_at"`
-	EndedAt       time.Time            `json:"ended_at"`
-	Cost          CostState            `json:"cost_state"`
-	Messages      MessageTotals        `json:"messages"`
-	ToolMix       map[string]*ToolStat `json:"tool_mix"`
+	SessionID     string    `json:"session_id"`
+	Project       string    `json:"project"`
+	Cwd           string    `json:"cwd"`
+	GitBranch     string    `json:"git_branch"`
+	ClientVersion string    `json:"client_version"`
+	Source        string    `json:"source"`
+	StartedAt     time.Time `json:"started_at"`
+	EndedAt       time.Time `json:"ended_at"`
+	// AITitle is Claude Code's generated title, CustomTitle the one the user
+	// set with /rename, PRNumber the last PR the session linked. Snapshots,
+	// latest wins; local only — no upload row carries them.
+	AITitle     string               `json:"ai_title,omitempty"`
+	CustomTitle string               `json:"custom_title,omitempty"`
+	PRNumber    int                  `json:"pr_number,omitempty"`
+	Cost        CostState            `json:"cost_state"`
+	Messages    MessageTotals        `json:"messages"`
+	ToolMix     map[string]*ToolStat `json:"tool_mix"`
 	// ClassMix is the same footprint grouped by class rather than by tool
 	// name. It is kept separately because one tool name is not one class:
 	// `Bash` is a codastre call, a grep, or neither, depending on the command
@@ -256,6 +262,15 @@ func (s *Session) Merge(inc *Session) {
 	}
 	if inc.ClientVersion != "" {
 		s.ClientVersion = inc.ClientVersion
+	}
+	if inc.AITitle != "" {
+		s.AITitle = inc.AITitle
+	}
+	if inc.CustomTitle != "" {
+		s.CustomTitle = inc.CustomTitle
+	}
+	if inc.PRNumber != 0 {
+		s.PRNumber = inc.PRNumber
 	}
 	s.Source = SourceTranscript
 	if !inc.StartedAt.IsZero() && (s.StartedAt.IsZero() || inc.StartedAt.Before(s.StartedAt)) {
