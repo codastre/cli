@@ -127,6 +127,7 @@ func (l *Ledger) request(model string, u *usage, sink *Session) {
 	if prompt == 0 {
 		return
 	}
+	sink.PromptTokens += prompt
 	if l.Prompt > 0 && float64(prompt) < float64(l.Prompt)*compactionShrink {
 		l.Classes, l.Episodes = map[string]int64{}, map[int]int64{}
 	}

@@ -116,6 +116,12 @@ type Session struct {
 	// the latter keyed by episode ordinal. Both are local only.
 	CostByClass map[string]*Cost `json:"cost_by_class,omitempty"`
 	EpisodeCost map[int]*Cost    `json:"episode_cost,omitempty"`
+	// PromptTokens sums every main-thread request's prompt (input + cache
+	// read + cache write): the token total that CostByClass's ingest and carry
+	// are slices of, so a class's share of it is a like-for-like ratio.
+	// Subagent requests are excluded for the same reason they are not
+	// attributed — their prompt is a different context window.
+	PromptTokens int64 `json:"prompt_tokens,omitempty"`
 	// CacheWrites is the per-model TTL split of cache writes, observed in the
 	// transcript's own requests.
 	CacheWrites map[string]*CacheWrites `json:"cache_writes,omitempty"`
@@ -288,6 +294,7 @@ func (s *Session) Merge(inc *Session) {
 	for class, c := range inc.CostByClass {
 		s.classCost(class).add(c)
 	}
+	s.PromptTokens += inc.PromptTokens
 	for ordinal, c := range inc.EpisodeCost {
 		s.episodeCost(ordinal).add(c)
 	}

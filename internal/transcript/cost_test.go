@@ -102,6 +102,15 @@ func TestAttributionSplitsIngestAndCarry(t *testing.T) {
 	}
 }
 
+// The prompt total counts each request once (b's repeated id is not
+// re-added), so search ingest + carry is a share of it, never above it.
+func TestPromptTokensSumMainThreadPrompts(t *testing.T) {
+	sess := parseLines(t, attributionLines())
+	if want := int64(1000 + 1350 + 1450 + 400 + 410); sess.PromptTokens != want {
+		t.Errorf("prompt tokens = %d, want %d", sess.PromptTokens, want)
+	}
+}
+
 func TestAttributionStaysUnpricedWithoutCostState(t *testing.T) {
 	lines := attributionLines()
 	sess := parseLines(t, lines[:len(lines)-1])
@@ -150,6 +159,10 @@ func TestAttributionResumesAcrossCollects(t *testing.T) {
 	}
 	if len(sess.EpisodeLog) != 2 || sess.EpisodeLog[1].Ordinal != 1 {
 		t.Errorf("episode log = %+v", sess.EpisodeLog)
+	}
+	// a 1000 + b 1350 + c 1450, then d2 1490 + e2 1502: each request once.
+	if want := int64(1000 + 1350 + 1450 + 1490 + 1502); sess.PromptTokens != want {
+		t.Errorf("prompt tokens = %d, want %d summed across both collects", sess.PromptTokens, want)
 	}
 }
 

@@ -18,7 +18,8 @@ import (
 // are not searches, shell file reads are reads — and stale cost-states.
 // v5: model ids normalised (modelKey) so a context-variant model such as
 // "claude-sonnet-5-5[1m]" is priced and its search costs are not absent.
-const StateVersion = 5
+// v6: main-thread prompt token total (Session.PromptTokens).
+const StateVersion = 6
 
 // FileMark is the per-file watermark: identity plus how far the parse got.
 // Identity is (inode, size) — a rotated or replaced file has a new inode, and
