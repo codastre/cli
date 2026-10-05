@@ -16,7 +16,9 @@ import (
 // v3: per-message-id usage dedup, no-match exits, search-cost attribution.
 // v4: structural Bash classification (pipeline.go) — piped output filters
 // are not searches, shell file reads are reads — and stale cost-states.
-const StateVersion = 4
+// v5: model ids normalised (modelKey) so a context-variant model such as
+// "claude-sonnet-5-5[1m]" is priced and its search costs are not absent.
+const StateVersion = 5
 
 // FileMark is the per-file watermark: identity plus how far the parse got.
 // Identity is (inode, size) — a rotated or replaced file has a new inode, and

@@ -163,3 +163,15 @@ func TestStateVersionBumpKeepsTheConsentBoundary(t *testing.T) {
 		t.Errorf("state = %+v, want sessions dropped and report_since kept", s)
 	}
 }
+
+func TestModelKeyStripsContextVariant(t *testing.T) {
+	for in, want := range map[string]string{
+		"claude-sonnet-5-5[1m]": "claude-sonnet-5-5",
+		"claude-sonnet-5-5":     "claude-sonnet-5-5",
+		"[1m]":                  "[1m]",
+	} {
+		if got := modelKey(in); got != want {
+			t.Errorf("modelKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

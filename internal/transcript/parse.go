@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -205,13 +206,14 @@ func (p *parser) costState(rec record) {
 		if c.Models == nil {
 			c.Models = map[string]ModelUsage{}
 		}
-		c.Models[name] = ModelUsage{
-			CostUSD:             m.CostUSD,
-			InputTokens:         m.InputTokens,
-			OutputTokens:        m.OutputTokens,
-			CacheReadTokens:     m.CacheReadInputTokens,
-			CacheCreationTokens: m.CacheCreationInputTokens,
-		}
+		key := modelKey(name)
+		mu := c.Models[key]
+		mu.CostUSD += m.CostUSD
+		mu.InputTokens += m.InputTokens
+		mu.OutputTokens += m.OutputTokens
+		mu.CacheReadTokens += m.CacheReadInputTokens
+		mu.CacheCreationTokens += m.CacheCreationInputTokens
+		c.Models[key] = mu
 	}
 	p.session.Cost = c
 	p.usageAfterCost = false
@@ -235,10 +237,11 @@ func (p *parser) assistant(rec record) {
 		// main thread's prompt is the one search results sit in.
 		if !rec.IsSidechain {
 			cw5, cw1 := cacheWriteSplit(u)
-			w := p.target().cacheWrites(rec.Message.Model)
+			model := modelKey(rec.Message.Model)
+			w := p.target().cacheWrites(model)
 			w.Ephemeral5m += cw5
 			w.Ephemeral1h += cw1
-			p.led().request(rec.Message.Model, u, p.target())
+			p.led().request(model, u, p.target())
 		}
 	}
 	for _, b := range blocks(rec.Message.Content) {
@@ -373,4 +376,16 @@ func (m *message) contentOrNil() json.RawMessage {
 		return nil
 	}
 	return m.Content
+}
+
+// modelKey is the identity a model is priced under. The cost-state record
+// names the model as the user selected it ("claude-sonnet-5-5[1m]", context
+// variant included) while each assistant message carries the bare id the API
+// returned; joining them on the raw strings finds no price, and every
+// attributed cost comes out absent.
+func modelKey(name string) string {
+	if i := strings.IndexByte(name, '['); i > 0 {
+		return name[:i]
+	}
+	return name
 }
