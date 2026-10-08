@@ -13,11 +13,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// fakeMarketplaces is what the fake `claude plugin marketplace list --json` prints.
+var fakeMarketplaces = "[]"
+
 // fakeClaude stands in for the `claude` binary: it records each invocation and
 // fails the ones whose joined args start with a prefix in failOn.
 func fakeClaude(t *testing.T, found bool, failOn ...string) *[]string {
 	t.Helper()
 	var calls []string
+	t.Cleanup(func() { fakeMarketplaces = "[]" })
 	origRun, origLook := commandRunner, claudeLookPath
 	t.Cleanup(func() { commandRunner, claudeLookPath = origRun, origLook })
 	claudeLookPath = func() (string, error) {
@@ -33,6 +37,9 @@ func fakeClaude(t *testing.T, found bool, failOn ...string) *[]string {
 			if strings.HasPrefix(joined, p) {
 				return []byte("boom"), errors.New("exit status 1")
 			}
+		}
+		if joined == "plugin marketplace list --json" {
+			return []byte(fakeMarketplaces), nil
 		}
 		return nil, nil
 	}
@@ -55,6 +62,7 @@ func TestInstallClaudePluginAtUserScope(t *testing.T) {
 
 	got := runInstall(t, srv.URL)
 	want := []string{
+		"plugin marketplace list --json",
 		"plugin marketplace add https://github.com/acme-private/ai-marketplace.git",
 		"plugin install codastre@acme-plugins --scope user",
 	}
@@ -66,13 +74,47 @@ func TestInstallClaudePluginAtUserScope(t *testing.T) {
 	}
 }
 
+func TestInstallClaudePluginRefreshesAnAlreadyAddedMarketplace(t *testing.T) {
+	// A shared company marketplace, added earlier under another spelling of its
+	// source: matched by name, refreshed rather than re-added.
+	srv := integrationsDiscoveryServer(t)
+	defer srv.Close()
+	calls := fakeClaude(t, true)
+	fakeMarketplaces = `[{"name":"other","source":"github","repo":"x/y"},
+		{"name":"acme-plugins","source":"github","repo":"acme-private/ai-marketplace"}]`
+
+	got := runInstall(t, srv.URL)
+	want := []string{
+		"plugin marketplace list --json",
+		"plugin marketplace update acme-plugins",
+		"plugin install codastre@acme-plugins --scope user",
+	}
+	if strings.Join(*calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls = %q, want %q", *calls, want)
+	}
+	if !strings.Contains(got, "Installed plugin") {
+		t.Fatalf("missing success line:\n%s", got)
+	}
+}
+
+func TestInstallClaudePluginSurvivesAFailedRefresh(t *testing.T) {
+	srv := integrationsDiscoveryServer(t)
+	defer srv.Close()
+	fakeClaude(t, true, "plugin marketplace update")
+	fakeMarketplaces = `[{"name":"acme-plugins"}]`
+
+	if got := runInstall(t, srv.URL); !strings.Contains(got, "Installed plugin") {
+		t.Fatalf("an offline refresh must not stop the install:\n%s", got)
+	}
+}
+
 func TestInstallClaudePluginToleratesExistingMarketplace(t *testing.T) {
 	srv := integrationsDiscoveryServer(t)
 	defer srv.Close()
 	calls := fakeClaude(t, true, "plugin marketplace add")
 
 	got := runInstall(t, srv.URL)
-	if len(*calls) != 2 || !strings.Contains(got, "Installed plugin") {
+	if len(*calls) != 3 || !strings.Contains(got, "Installed plugin") {
 		t.Fatalf("a failing marketplace add must not stop the install; calls=%q out:\n%s", *calls, got)
 	}
 }

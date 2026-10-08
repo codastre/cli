@@ -94,7 +94,9 @@ claude plugin install codastre@codastre-plugins --scope user
 
 `codastre connect claude` runs those two commands for you, pointing at whichever source
 your server publishes (a self-hosted deployment usually mirrors the integrations into an
-internal marketplace). Pass `--no-plugin` to skip the install — connect then prints the
+internal marketplace). A marketplace already added on the machine — say a company one
+shared by several plugins — is refreshed (`claude plugin marketplace update`) instead of
+re-added. Pass `--no-plugin` to skip the install — connect then prints the
 commands instead, and does the same when `claude` isn't on PATH or the install fails.
 When the plugin installs, connect writes no MCP entry of its own (the plugin ships one,
 always the local proxy) unless `--server` or a snippet flag needs it. Codex and opencode have no integration

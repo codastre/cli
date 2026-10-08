@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -48,28 +49,58 @@ func installClaudePlugin(cmd *cobra.Command, serverURL string) bool {
 	}
 
 	fmt.Fprintf(out, "\nInstalling the Codastre plugin for Claude Code (from %s)…\n", src.Label)
-	steps := pluginInstallArgs(src)
-	for i, args := range steps {
-		ctx, cancel := context.WithTimeout(cmdContext(cmd), pluginInstallTimeout)
-		output, err := commandRunner(ctx, bin, args...)
-		cancel()
-		// A marketplace that is already registered makes `marketplace add` fail on
-		// some Claude Code versions; the install step is the one that decides.
-		if err != nil && i < len(steps)-1 {
-			continue
+	// The marketplace may already be on this machine — a company marketplace is
+	// usually shared by several plugins. Refresh it rather than re-adding, so the
+	// install sees the current catalog. Either way this step is non-fatal: a stale
+	// or unreachable marketplace can still serve the install, which decides.
+	marketplace := []string{"plugin", "marketplace", "add", src.Source}
+	if marketplaceAdded(cmd, bin, src.MarketplaceName) {
+		marketplace = []string{"plugin", "marketplace", "update", src.MarketplaceName}
+	}
+	_, _ = runClaude(cmd, bin, marketplace)
+
+	install := pluginInstallArgs(src)[1]
+	if output, err := runClaude(cmd, bin, install); err != nil {
+		fmt.Fprintf(out, "warning: `claude %s` failed: %v\n", strings.Join(install, " "), err)
+		if msg := strings.TrimSpace(string(output)); msg != "" {
+			fmt.Fprintf(out, "  %s\n", strings.ReplaceAll(msg, "\n", "\n  "))
 		}
-		if err != nil {
-			fmt.Fprintf(out, "warning: `claude %s` failed: %v\n", strings.Join(args, " "), err)
-			if msg := strings.TrimSpace(string(output)); msg != "" {
-				fmt.Fprintf(out, "  %s\n", strings.ReplaceAll(msg, "\n", "\n  "))
-			}
-			printIntegrationCommands(cmd, src)
-			return false
-		}
+		printIntegrationCommands(cmd, src)
+		return false
 	}
 	fmt.Fprintf(out, "Installed plugin codastre@%s (user scope). Restart Claude Code to load it.\n"+
 		"Skip this next time with --no-plugin.\n", src.MarketplaceName)
 	return true
+}
+
+// runClaude runs one `claude` invocation under pluginInstallTimeout.
+func runClaude(cmd *cobra.Command, bin string, args []string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(cmdContext(cmd), pluginInstallTimeout)
+	defer cancel()
+	return commandRunner(ctx, bin, args...)
+}
+
+// marketplaceAdded reports whether Claude Code already has a marketplace named
+// name. Matched by name, not source: the name is what `install codastre@<name>`
+// resolves, and one marketplace can be spelled as several sources (owner/repo,
+// https, ssh). False when the list can't be read — `add` is then the fallback.
+func marketplaceAdded(cmd *cobra.Command, bin, name string) bool {
+	output, err := runClaude(cmd, bin, []string{"plugin", "marketplace", "list", "--json"})
+	if err != nil {
+		return false
+	}
+	var marketplaces []struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(output, &marketplaces) != nil {
+		return false
+	}
+	for _, m := range marketplaces {
+		if m.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // pluginEntrySuffices reports whether the plugin's MCP entry — a bare `codastre
@@ -112,7 +143,7 @@ func useClaudePluginEntry(cmd *cobra.Command, name, scope, path string, stdio bo
 // printIntegrationCommands prints the manual install commands for src.
 func printIntegrationCommands(cmd *cobra.Command, src integrationsSource) {
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "Install it yourself with:\n\n")
+	fmt.Fprintf(out, "Install it yourself with (skip the first if the marketplace is already added):\n\n")
 	for _, args := range pluginInstallArgs(src) {
 		fmt.Fprintf(out, "  claude %s\n", strings.Join(args, " "))
 	}
