@@ -135,6 +135,7 @@ codastre graph PaymentService.charge --kind calls --depth 2
 | `codastre dashboard` | Open the web dashboard in an already-authenticated session |
 | `codastre doctor` | Run diagnostics — exit `0` = all pass, `1` = error, `2` = warnings only |
 | `codastre logout` | Revoke the stored API key server-side and remove it from the keychain |
+| `codastre self-update` | Replace the binary with the latest release, checksum-verified (`--check` to only report, `--version X.Y.Z` to pin) |
 | `codastre version` | Print the CLI version |
 
 Run `codastre <command> --help` for flags and details.
