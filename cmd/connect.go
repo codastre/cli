@@ -32,6 +32,13 @@ Two connection modes:
              branch. REQUIRED for hmac-masked repos. Launch your agent from
              inside the repository (serve resolves it from the local git root).
 
+For claude, connect first installs the Codastre plugin (commands, skills and
+hooks that steer the agent to Codastre) at user scope via 'claude plugin
+install'. The plugin ships its own 'codastre serve' MCP server, so connect then
+writes no entry of its own (and removes a stale one) unless --server or a
+snippet flag needs one. Pass --no-plugin to skip the plugin, write the entry,
+and get the install commands instead.
+
 The API key is read from the OS keychain; run 'codastre login' first.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runConnect,
@@ -43,6 +50,7 @@ var connectScope string
 var connectStdio bool
 var connectMaxSnippetLines int
 var connectNoSnippets bool
+var connectNoPlugin bool
 
 func init() {
 	connectCmd.Flags().StringVar(&connectServerURL, "server", defaultServerURL(), "Server URL [$CODASTRE_SERVER]")
@@ -56,6 +64,9 @@ func init() {
 		"Bake `serve --max-snippet-lines N` into the generated stdio config (0 = omit)")
 	connectCmd.Flags().BoolVar(&connectNoSnippets, "no-snippets", false,
 		"Bake `serve --no-snippets` into the generated stdio config (ranked locations only)")
+	connectCmd.Flags().BoolVar(&connectNoPlugin, "no-plugin", false,
+		"Don't install the Codastre Claude Code plugin (user scope); print the install commands instead."+
+			" Only applies to the 'claude' target.")
 	rootCmd.AddCommand(connectCmd)
 }
 
@@ -97,10 +108,19 @@ func runConnect(cmd *cobra.Command, args []string) error {
 //	project → .mcp.json in the current directory   (committed to git; this repo only)
 //
 // When writing to user scope, any stale entry in the local-scope file is removed.
+//
+// Unless --no-plugin, the Codastre plugin is installed first. When it installs and
+// its own `codastre serve` entry is equivalent to the one requested, no entry is
+// written (and a stale one is removed) so Claude Code doesn't list two servers.
 func connectClaude(cmd *cobra.Command, name, mcpURL, serverURL, apiKey, scope string, stdio bool) error {
 	path, err := claudePathForScope(scope)
 	if err != nil {
 		return err
+	}
+
+	installed := !connectNoPlugin && installClaudePlugin(cmd, serverURL)
+	if installed && pluginEntrySuffices(serverURL) {
+		return useClaudePluginEntry(cmd, name, scope, path, stdio)
 	}
 
 	data, err := readJSONFile(path)
@@ -123,7 +143,7 @@ func connectClaude(cmd *cobra.Command, name, mcpURL, serverURL, apiKey, scope st
 	// When promoting to user scope, remove any stale local-scope entry to avoid duplicates.
 	if scope == "user" {
 		if localPath, err := claudePathForScope("local"); err == nil {
-			_ = removeJSONEntry(localPath, "mcpServers", name)
+			_, _ = removeJSONEntry(localPath, "mcpServers", name)
 		}
 	}
 
@@ -133,7 +153,14 @@ func connectClaude(cmd *cobra.Command, name, mcpURL, serverURL, apiKey, scope st
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "%s MCP server %q → %s\n", verb, name, path)
 	printModeHint(cmd, stdio)
-	printIntegrationHint(cmd, "claude", serverURL)
+	switch {
+	case connectNoPlugin:
+		printIntegrationHint(cmd, "claude", serverURL)
+	case installed:
+		fmt.Fprintf(cmd.OutOrStdout(), "\nKept %q alongside the plugin's own server: --server or a snippet flag\n"+
+			"differs from what the plugin's bare `codastre serve` would use, so Claude Code\n"+
+			"will list both. Drop the flags (or run `codastre login --server …`) to use one.\n", name)
+	}
 	return nil
 }
 
@@ -283,30 +310,31 @@ func writeJSONFile(path string, data map[string]any) error {
 	return nil
 }
 
-// removeJSONEntry deletes data[outerKey][innerKey] in the JSON file at path.
-// A no-op if the file, the outer key, or the inner key do not exist.
-func removeJSONEntry(path, outerKey, innerKey string) error {
+// removeJSONEntry deletes data[outerKey][innerKey] in the JSON file at path and
+// reports whether it was there. A no-op if the file, the outer key, or the inner
+// key do not exist.
+func removeJSONEntry(path, outerKey, innerKey string) (bool, error) {
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
+		return false, fmt.Errorf("read %s: %w", path, err)
 	}
 	var data map[string]any
 	if err := json.Unmarshal(b, &data); err != nil {
-		return nil // don't corrupt an unparseable file
+		return false, nil // don't corrupt an unparseable file
 	}
 	outer, _ := data[outerKey].(map[string]any)
 	if outer == nil {
-		return nil
+		return false, nil
 	}
 	if _, ok := outer[innerKey]; !ok {
-		return nil
+		return false, nil
 	}
 	delete(outer, innerKey)
 	data[outerKey] = outer
-	return writeJSONFile(path, data)
+	return true, writeJSONFile(path, data)
 }
 
 // ── TOML helper ───────────────────────────────────────────────────────────────

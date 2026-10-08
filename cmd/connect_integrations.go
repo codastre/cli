@@ -1,9 +1,7 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
-	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -39,9 +37,10 @@ func resolveIntegrationsSource(d *serverDiscovery) integrationsSource {
 	return d.Integrations
 }
 
-// printIntegrationHint advertises the integration for the harness just connected.
-// Registering the MCP server only makes Codastre available to the agent; the
-// integration is what makes it reach for Codastre rather than falling back to grep.
+// printIntegrationHint advertises the integration for the harness just connected,
+// for users who opted out of the automatic install (--no-plugin). Registering the
+// MCP server only makes Codastre available to the agent; the integration is what
+// makes it reach for Codastre rather than falling back to grep.
 //
 // Only harnesses with an integration available get a hint — today that is Claude
 // Code, which installs through its plugin marketplace. Best-effort by design:
@@ -51,21 +50,9 @@ func printIntegrationHint(cmd *cobra.Command, target, serverURL string) {
 	if target != "claude" {
 		return
 	}
-	// cobra only populates the context during Execute; a command constructed
-	// directly (tests, or any non-Execute caller) carries a nil one, and
-	// context.WithTimeout panics on that.
-	parent := cmd.Context()
-	if parent == nil {
-		parent = context.Background()
-	}
-	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
-	defer cancel()
-
-	src := resolveIntegrationsSource(discover(ctx, serverURL))
-	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "\nOptional — the Codastre integration for Claude Code adds slash commands,\n"+
+	src := resolveIntegrationsSource(discoverWithTimeout(cmd, serverURL))
+	fmt.Fprintf(cmd.OutOrStdout(), "\nOptional — the Codastre integration for Claude Code adds slash commands,\n"+
 		"skills that load themselves, and hooks that steer the agent to Codastre\n"+
-		"instead of grep. Published in %s:\n\n", src.Label)
-	fmt.Fprintf(out, "  claude plugin marketplace add %s\n", src.Source)
-	fmt.Fprintf(out, "  claude plugin install codastre@%s --scope project\n", src.MarketplaceName)
+		"instead of grep. Published in %s. ", src.Label)
+	printIntegrationCommands(cmd, src)
 }

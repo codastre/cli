@@ -76,7 +76,7 @@ func TestIntegrationHintUsesTheDeploymentSource(t *testing.T) {
 	for _, want := range []string{
 		"the Acme AI Marketplace",
 		"claude plugin marketplace add https://github.com/acme-private/ai-marketplace.git",
-		"claude plugin install codastre@acme-plugins --scope project",
+		"claude plugin install codastre@acme-plugins --scope user",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("hint missing %q; got:\n%s", want, got)

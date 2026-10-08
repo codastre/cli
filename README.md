@@ -89,14 +89,16 @@ as a plugin:
 
 ```bash
 claude plugin marketplace add codastre/integrations
-claude plugin install codastre@codastre-plugins --scope project
+claude plugin install codastre@codastre-plugins --scope user
 ```
 
-`codastre connect claude` prints those two lines for you, pointing at whichever source
+`codastre connect claude` runs those two commands for you, pointing at whichever source
 your server publishes (a self-hosted deployment usually mirrors the integrations into an
-internal marketplace). The plugin ships its own `codastre serve` MCP entry, so it also
-covers step 3. Codex and opencode have no integration yet — they get the same tools over
-MCP from step 3 alone.
+internal marketplace). Pass `--no-plugin` to skip the install — connect then prints the
+commands instead, and does the same when `claude` isn't on PATH or the install fails.
+When the plugin installs, connect writes no MCP entry of its own (the plugin ships one,
+always the local proxy) unless `--server` or a snippet flag needs it. Codex and opencode have no integration
+yet — they get the same tools over MCP from step 3 alone.
 
 Step 2 is what makes a hit show code instead of just naming a file. Snippets are
 hydrated from a local clone, so a repo codastre can't find on disk still matches

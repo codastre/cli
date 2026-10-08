@@ -88,6 +88,7 @@ func TestCodexStdioSection(t *testing.T) {
 func TestConnectClaudeStdioWritesConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	fakeClaude(t, false) // never shell out to a real `claude` from a test
 
 	if err := connectClaude(newTestCmd(), "codastre", "http://srv/mcp", "http://srv", "k", "user", true); err != nil {
 		t.Fatalf("connectClaude: %v", err)
