@@ -5,7 +5,9 @@ package keychain
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -30,8 +32,9 @@ var osKeychainBackends = []keyring.BackendType{
 
 // Store wraps the chosen keyring backend.
 type Store struct {
-	ring       keyring.Keyring
-	isFallback bool
+	ring              keyring.Keyring
+	leftoverFileStore keyring.Keyring
+	isFallback        bool
 }
 
 // Open returns a Store backed by the OS keychain, or by a file fallback if the
@@ -44,7 +47,7 @@ func Open() (*Store, bool, error) {
 		KeychainAccessibleWhenUnlocked: true,
 	})
 	if err == nil {
-		return &Store{ring: ring}, false, nil
+		return &Store{ring: ring, leftoverFileStore: openLeftoverFileStore()}, false, nil
 	}
 
 	// Fall back to file storage.
@@ -52,17 +55,52 @@ func Open() (*Store, bool, error) {
 	if mkErr := os.MkdirAll(dir, 0700); mkErr != nil {
 		return nil, false, fmt.Errorf("keychain unavailable (%v); file fallback failed: %w", err, mkErr)
 	}
-	fring, ferr := keyring.Open(keyring.Config{
+	fring, ferr := openFileRing(dir)
+	if ferr != nil {
+		return nil, false, fmt.Errorf("keychain unavailable (%v); file fallback failed: %w", err, ferr)
+	}
+	return &Store{ring: fring, isFallback: true}, true, nil
+}
+
+func openFileRing(dir string) (keyring.Keyring, error) {
+	return keyring.Open(keyring.Config{
 		AllowedBackends: []keyring.BackendType{keyring.FileBackend},
 		FileDir:         dir,
 		FilePasswordFunc: func(string) (string, error) {
 			return "", nil // unencrypted; security derives from 0700 dir
 		},
 	})
-	if ferr != nil {
-		return nil, false, fmt.Errorf("keychain unavailable (%v); file fallback failed: %w", err, ferr)
+}
+
+func openLeftoverFileStore() keyring.Keyring {
+	dir := fallbackDir()
+	if _, err := os.Stat(dir); err != nil {
+		return nil
 	}
-	return &Store{ring: fring, isFallback: true}, true, nil
+	ring, err := openFileRing(dir)
+	if err != nil {
+		return nil
+	}
+	return ring
+}
+
+func (s *Store) get(id string) (keyring.Item, error) {
+	item, err := s.ring.Get(id)
+	if isNotFound(err) && s.leftoverFileStore != nil {
+		return s.moveLeftoverIntoKeychain(id)
+	}
+	return item, err
+}
+
+func (s *Store) moveLeftoverIntoKeychain(id string) (keyring.Item, error) {
+	item, err := s.leftoverFileStore.Get(id)
+	if err != nil {
+		return keyring.Item{}, keyring.ErrKeyNotFound
+	}
+	if s.ring.Set(item) == nil {
+		_ = s.leftoverFileStore.Remove(id)
+	}
+	return item, nil
 }
 
 // IsFallback reports whether the file backend is in use instead of the OS keychain.
@@ -70,7 +108,7 @@ func (s *Store) IsFallback() bool { return s.isFallback }
 
 // GetAPIKey retrieves the API key stored for a server host.
 func (s *Store) GetAPIKey(serverHost string) (string, error) {
-	item, err := s.ring.Get(serverHost)
+	item, err := s.get(serverHost)
 	if err != nil {
 		return "", err
 	}
@@ -97,17 +135,30 @@ func (s *Store) SetAPIKey(serverHost, apiKey string) error {
 // DeleteAPIKey removes the stored API key for a server host.
 // Returns nil if no key was stored (idempotent logout).
 func (s *Store) DeleteAPIKey(serverHost string) error {
-	err := s.ring.Remove(serverHost)
-	if err == keyring.ErrKeyNotFound {
-		return nil
+	if s.leftoverFileStore != nil {
+		if err := removeIfPresent(s.leftoverFileStore, serverHost); err != nil {
+			return err
+		}
 	}
-	return err
+	return removeIfPresent(s.ring, serverHost)
+}
+
+func removeIfPresent(ring keyring.Keyring, id string) error {
+	if err := ring.Remove(id); err != nil && !isNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+// The file backend's Remove returns fs.ErrNotExist instead of keyring.ErrKeyNotFound.
+func isNotFound(err error) bool {
+	return errors.Is(err, keyring.ErrKeyNotFound) || errors.Is(err, fs.ErrNotExist)
 }
 
 // GetMaskKey retrieves the repo masking key for a given revision.
 // Returns the raw key bytes (decoded from hex storage).
 func (s *Store) GetMaskKey(serverHost, repoID string, rev int) ([]byte, error) {
-	item, err := s.ring.Get(maskKeyID(serverHost, repoID, rev))
+	item, err := s.get(maskKeyID(serverHost, repoID, rev))
 	if err != nil {
 		return nil, err
 	}
