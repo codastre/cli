@@ -19,7 +19,11 @@ type queryEnvelope struct {
 	Repos             map[string]repoInfo `json:"repos"`
 	SyncJobID         *string             `json:"sync_job_id"`
 	MaskKeyRev        int                 `json:"mask_key_rev"`
-	Results           []queryResult       `json:"results"`
+	// D2 echo: which mode produced the results, and — on a symbol request —
+	// whether a definition was found. Absent from servers predating symbol mode.
+	MatchUsed   *string       `json:"match_used"`
+	SymbolFound *bool         `json:"symbol_found"`
+	Results     []queryResult `json:"results"`
 }
 
 // searchedCount is the number of repos searched: the scoped federated count
@@ -112,7 +116,10 @@ func renderQueryHuman(
 		return fmt.Errorf("decode QUERY response: %w", err)
 	}
 
-	fmt.Fprintf(w, "freshness: %s · searched %d repo(s)", env.Freshness, env.searchedCount())
+	// The request is not consulted here: runQuery warns on stderr when a symbol
+	// request came back without the echo (an older server ran hybrid).
+	tag, notes := mcpshim.MatchLines(env.MatchUsed, env.SymbolFound, false, "")
+	fmt.Fprintf(w, "freshness: %s · searched %d repo(s)%s", env.Freshness, env.searchedCount(), tag)
 	if noSnippets {
 		// Names the flag, because this is the default state: hydration is
 		// otherwise invisible, and a feature nobody can find is not a feature.
@@ -123,6 +130,9 @@ func renderQueryHuman(
 	fmt.Fprintln(w)
 	if env.SyncJobID != nil && *env.SyncJobID != "" {
 		fmt.Fprintf(w, "sync in progress: job %s\n", *env.SyncJobID)
+	}
+	for _, n := range notes {
+		fmt.Fprintln(w, n)
 	}
 	fmt.Fprintln(w)
 

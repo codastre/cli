@@ -68,7 +68,16 @@ Examples:
   codastre query "parse config" --language go --format agent  # compact text for agents
   codastre query "recall service" --snippets                  # print the bodies too
   codastre query "payment webhook" --all --stacks backend     # only backend repos
-  codastre query "push token refresh" --all --stacks android  # Android repos only`,
+  codastre query "push token refresh" --all --stacks android  # Android repos only
+  codastre query --symbol isSearchStage                     # where is it DEFINED
+  codastre query symbol:Session.Merge --all --snippets      # same, as query sugar
+
+Symbol mode (--symbol, or a "symbol:" prefix — parsed here, never sent as
+text) returns the exact definitions of an identifier, not its call sites. It is
+case-sensitive and finds what the indexer extracts as definitions (functions,
+methods, classes, types). With no definition it falls back to the ordinary
+search and says so; that means "no extracted definition", not "does not exist".
+Use 'codastre graph' for who calls it.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runQuery,
@@ -96,6 +105,7 @@ var (
 	queryMaxSnippetLines int
 	querySnippetsTop     int
 	queryCorpora         bool
+	querySymbol          bool
 )
 
 func init() {
@@ -144,6 +154,10 @@ func init() {
 			"ticket prose or a name, when the question is what to open. Always "+
 			"federated, so it rejects --index-id/--repo-url/--all and the "+
 			"per-result filters rather than ignoring them")
+	f.BoolVar(&querySymbol, "symbol", false,
+		"Exact-definition lookup: the query is an identifier (isSearchStage, "+
+			"Session.Merge) and results are where it is defined. Same as a "+
+			"\"symbol:\" prefix on the query")
 	rootCmd.AddCommand(queryCmd)
 }
 
@@ -166,7 +180,7 @@ func corporaFlagConflicts(changed func(string) bool) (errs []string, warns []str
 	}
 	// Result filters with no CORPUS_SEARCH equivalent. They would have excluded
 	// evidence, so ignoring them changes the ranking.
-	for _, f := range []string{"ref", "path-prefix", "alert-ids", "error-codes"} {
+	for _, f := range []string{"ref", "path-prefix", "alert-ids", "error-codes", "symbol"} {
 		if changed(f) {
 			errs = append(errs, "--"+f)
 		}
@@ -186,8 +200,13 @@ func corporaFlagConflicts(changed func(string) bool) (errs []string, warns []str
 // unset filter must serialise to NO key at all, because an empty list on the
 // wire is a filter the server would apply. That is the back-compat contract for
 // every command that predates a flag.
-func queryToolArgs(text, format string) map[string]any {
+func queryToolArgs(text, format string, symbol bool) map[string]any {
 	toolArgs := map[string]any{"query_text": text, "top_k": queryTopK}
+	// Sent only when asked for, like every filter: an older server then sees the
+	// request it always saw.
+	if symbol {
+		toolArgs["match"] = mcpshim.MatchSymbol
+	}
 	if queryRef != "" {
 		toolArgs["ref"] = queryRef
 	}
@@ -221,7 +240,16 @@ func queryToolArgs(text, format string) map[string]any {
 }
 
 func runQuery(cmd *cobra.Command, args []string) error {
+	text, symbol, err := mcpshim.ParseSymbolQuery(args[0], querySymbol)
+	if err != nil {
+		return err
+	}
 	if queryCorpora {
+		if symbol {
+			return fmt.Errorf("--corpora cannot be combined with symbol mode: corpus " +
+				"ranking answers \"which repo\", a symbol lookup answers \"where is it " +
+				"defined\" — drop one")
+		}
 		// Flags that do not exist on the corpus path are rejected or reported,
 		// never silently dropped. `--corpora --repo-url X` reads as "rank corpora
 		// within this repo", which is not a question this mode can answer, and
@@ -273,7 +301,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+warn)
 	}
 
-	toolArgs := queryToolArgs(args[0], format)
+	toolArgs := queryToolArgs(text, format, symbol)
 
 	// Server caps QUERY at 10s; allow margin for transport.
 	ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
@@ -289,6 +317,12 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		// --json is a raw passthrough of the server envelope (path_tokens intact),
 		// so agents that parse it can unmask themselves via the proxy or keychain.
 		return printJSON(cmd.OutOrStdout(), payload)
+	}
+	if symbol && format == formatHuman && !hasMatchEcho(payload) {
+		// The request cannot say what answered: an older server ignores `match`
+		// and runs hybrid, and these results must not read as definitions.
+		fmt.Fprintln(cmd.ErrOrStderr(),
+			"warning: this server does not support symbol mode — results are hybrid search")
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "target: %s\n", tgt.describe())
 	var unmask func(pathToken string, maskKeyRev int) (string, bool)
@@ -313,7 +347,9 @@ func runQuery(cmd *cobra.Command, args []string) error {
 
 	if format == formatAgent {
 		text, ok := mcpshim.RenderQueryText(payload, mcpshim.RenderOptions{
-			NoSnippets: noSnippets,
+			NoSnippets:      noSnippets,
+			SymbolRequested: symbol,
+			QueryText:       text,
 			// Still passed: hydration writes real_path only where it could
 			// resolve one, and the renderer unmasks what is left over.
 			Unmask: unmask,
@@ -325,6 +361,15 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	return renderQueryHuman(cmd.OutOrStdout(), payload, unmask, noSnippets)
+}
+
+// hasMatchEcho reports whether the server echoed `match_used` (D2) — the only
+// evidence that it understood a `match` argument.
+func hasMatchEcho(payload json.RawMessage) bool {
+	var env struct {
+		MatchUsed *string `json:"match_used"`
+	}
+	return json.Unmarshal(payload, &env) == nil && env.MatchUsed != nil
 }
 
 // hydrateQuery reads each result's line span from a local checkout, returning

@@ -47,6 +47,8 @@ type renderEnvelope struct {
 	MaskKeyRev        int                   `json:"mask_key_rev"`
 	MaskKeyRevs       map[string]int        `json:"mask_key_revs"`
 	FilterMatched     *bool                 `json:"filter_matched"`
+	MatchUsed         *string               `json:"match_used"`
+	SymbolFound       *bool                 `json:"symbol_found"`
 	Results           []renderResult        `json:"results"`
 }
 
@@ -195,6 +197,12 @@ type RenderOptions struct {
 	// Inside the proxy it is nil, because enrichGraphResponse has already
 	// backfilled the URLs; `codastre graph` holds the raw envelope and passes one.
 	RepoLabel func(repoID string) (string, bool)
+	// SymbolRequested and QueryText are set by `codastre query` for a symbol
+	// request: the first lets the header say an older server ignored `match`,
+	// the second names the symbol in the "no definition" notice. The proxy
+	// leaves both unset and renders from the envelope's echo alone.
+	SymbolRequested bool
+	QueryText       string
 }
 
 // RenderQueryText renders a QUERY payload as agent text for callers outside this
@@ -227,7 +235,7 @@ func renderQueryText(payload []byte, opts RenderOptions) (string, bool) {
 	}
 
 	var b strings.Builder
-	writeHeader(&b, env, opts.NoSnippets)
+	writeHeader(&b, env, opts)
 	if len(env.Results) == 0 {
 		b.WriteString("no matches\n")
 		// A prefix that matched nothing indexed is a different answer from "the
@@ -253,15 +261,20 @@ func renderQueryText(payload []byte, opts RenderOptions) (string, bool) {
 	return b.String(), true
 }
 
-func writeHeader(b *strings.Builder, env renderEnvelope, noSnippets bool) {
+func writeHeader(b *strings.Builder, env renderEnvelope, opts RenderOptions) {
 	mode := "snippets:on"
-	if noSnippets {
+	if opts.NoSnippets {
 		mode = "snippets:off"
 	} else if n := hydratedTop(env.Results); n >= 0 {
 		mode = fmt.Sprintf("snippets:top %d", n)
 	}
-	fmt.Fprintf(b, "codastre · %d hits · %d repo(s) searched · %s · %s\n",
-		len(env.Results), env.searchedCount(), env.Freshness, mode)
+	tag, notes := matchLines(env.MatchUsed, env.SymbolFound, opts.SymbolRequested, opts.QueryText)
+	fmt.Fprintf(b, "codastre · %d hits · %d repo(s) searched · %s%s · %s\n",
+		len(env.Results), env.searchedCount(), env.Freshness, tag, mode)
+	for _, n := range notes {
+		b.WriteString(n)
+		b.WriteByte('\n')
+	}
 	// A sync in flight means these results may predate the working tree; the
 	// job id is what a follow-up call would poll.
 	if env.SyncJobID != nil && *env.SyncJobID != "" {
