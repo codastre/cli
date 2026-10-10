@@ -26,7 +26,43 @@ type syncState struct {
 	ToRef    string    `json:"to_ref"`
 	ToSHA    string    `json:"to_sha"`
 	SyncedAt time.Time `json:"synced_at"`
+	// Status of the attempt for this ref pair (search-effectiveness C). Empty in
+	// files written before it, which read as syncDone.
+	Status string `json:"status,omitempty"`
+	// SentSHA is the commit actually sent when it differs from ToSHA (HEAD): an
+	// unpushed HEAD is synced at its newest pushed ancestor, since the server can
+	// only read commits it can fetch. ToSHA stays HEAD — it is the dedup key.
+	SentSHA string `json:"sent_sha,omitempty"`
 }
+
+// sentOrHead is the commit the recorded attempt actually sent.
+func (st *syncState) sentOrHead() string {
+	if st.SentSHA != "" {
+		return st.SentSHA
+	}
+	return st.ToSHA
+}
+
+// Attempt statuses, each with its own suppression window. Every caller that
+// dedups — the HEAD watchers of N agent sessions and every `codastre query`
+// eager sync, often fired in parallel — reads the same file, so the windows are
+// what keep one commit from producing a burst of identical SYNCs.
+const (
+	// syncDone: handled — synced, or nothing to sync (base branch, base commit,
+	// repo not registered, no ready base, HEAD not pushed). syncStateTTL.
+	syncDone = "done"
+	// syncPending: an attempt is in flight. Parallel callers wait it out rather
+	// than send their own; a crashed attempt stops suppressing after the window.
+	syncPending = "pending"
+	// syncFailed: the last attempt errored. Back off instead of retrying (and,
+	// for a query, waiting out the eager-sync budget) on every call.
+	syncFailed = "failed"
+)
+
+const (
+	syncPendingWindow = time.Minute
+	syncFailedBackoff = 2 * time.Minute
+)
 
 func syncStatePath(repoRoot string) string {
 	return filepath.Join(repoRoot, ".git", "codastre-sync-state.json")
@@ -82,5 +118,12 @@ func syncIsRedundant(st *syncState, toRef, toSHA string, now time.Time) bool {
 	if st.ToRef != toRef || st.ToSHA != toSHA {
 		return false
 	}
-	return now.Sub(st.SyncedAt) < syncStateTTL
+	window := syncStateTTL
+	switch st.Status {
+	case syncPending:
+		window = syncPendingWindow
+	case syncFailed:
+		window = syncFailedBackoff
+	}
+	return now.Sub(st.SyncedAt) < window
 }

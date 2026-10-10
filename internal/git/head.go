@@ -50,3 +50,25 @@ func CountCommits(repoPath, from, to string) (int, error) {
 	}
 	return strconv.Atoi(strings.TrimSpace(string(out)))
 }
+
+// OnRemote reports whether sha is contained in any remote-tracking branch of
+// remote (`refs/remotes/<remote>/*`) — i.e. whether the server, which fetches
+// from that remote, can fetch it. Judged from the last fetch, so a commit pushed
+// from another machine since then reads as absent; errs toward "not pushed".
+func OnRemote(repoPath, remote, sha string) bool {
+	out, err := exec.Command("git", "-C", repoPath, "for-each-ref", "--count=1",
+		"--contains", sha, "--format=%(refname)", "refs/remotes/"+remote+"/").Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
+}
+
+// PushedBase returns the newest commit of sha's history that remote has, judged
+// by its merge-base with the branch's upstream (`<sha>@{upstream}` is not valid
+// syntax, so the current branch's `@{upstream}` is used). Empty when the branch
+// has no upstream or the upstream does not share history with sha.
+func PushedBase(repoPath, sha string) string {
+	out, err := exec.Command("git", "-C", repoPath, "merge-base", sha, "@{upstream}").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}

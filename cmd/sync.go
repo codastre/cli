@@ -23,17 +23,21 @@ var syncCmd = &cobra.Command{
 }
 
 var syncOnce bool
+var syncDedup bool
 var syncServerURL string
 
 func init() {
 	syncCmd.Flags().BoolVar(&syncOnce, "once", false, "Single sync then exit")
+	syncCmd.Flags().BoolVar(&syncDedup, "dedup", false,
+		"With --once, skip when this HEAD was synced recently, is being synced, or "+
+			"just failed (what the watcher and query do); for hooks that may fire often")
 	syncCmd.Flags().StringVar(&syncServerURL, "server", defaultServerURL(), "Server URL [$CODASTRE_SERVER]")
 	rootCmd.AddCommand(syncCmd)
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
 	if syncOnce {
-		return doSync(false)
+		return doSync(syncDedup)
 	}
 	return watchAndSync()
 }
@@ -120,7 +124,8 @@ func pollSync(repoRoot string) error {
 // duplicate SYNCs.
 //
 // dedup is false for an explicit `codastre sync --once`: the user asked for a
-// sync, so they get one even if the refs have not moved.
+// sync, so they get one even if the refs have not moved. `--once --dedup` (the
+// plugin's session-start hook) opts back in.
 func doSync(dedup bool) error {
 	return syncRepo(syncServerURL, dedup, os.Stderr)
 }
@@ -138,10 +143,36 @@ func syncRepo(serverURL string, dedup bool, log io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if dedup && syncIsRedundant(readSyncState(repoRoot), toName, toSHA, time.Now()) {
+	prev := readSyncState(repoRoot)
+	if dedup && syncIsRedundant(prev, toName, toSHA, time.Now()) {
 		return nil
 	}
+	rec := syncRecorder{log: log, root: repoRoot, toName: toName, toSHA: toSHA}
+	// While HEAD is unpushed every new local commit maps to the same pushed base;
+	// re-sending that SYNC per commit would cost a job each time for nothing. The
+	// target is local knowledge, so this check costs no request.
+	if dedup && prev != nil && prev.ToRef == toName && prev.Status == syncDone &&
+		time.Since(prev.SyncedAt) < syncStateTTL {
+		if sent, ok := fetchableTarget(repoRoot, toSHA); ok && sent == prev.sentOrHead() {
+			rec.done(prev.IndexID, sent)
+			return nil
+		}
+	}
+	// Claim the ref pair before the first request, so parallel callers (several
+	// queries, several sessions' watchers) wait this attempt out instead of each
+	// sending their own. Every exit below overwrites the claim.
+	rec.write(syncPending, "", "")
+	if err := syncAttempt(serverURL, log, rec); err != nil {
+		rec.write(syncFailed, "", "")
+		return err
+	}
+	return nil
+}
 
+// syncAttempt is one SYNC round-trip for HEAD; every non-error exit records the
+// outcome through rec (an error is recorded as failed by the caller).
+func syncAttempt(serverURL string, log io.Writer, rec syncRecorder) error {
+	repoRoot, toName, toSHA := rec.root, rec.toName, rec.toSHA
 	apiKey, warn, err := resolveAPIKey(serverURL, "")
 	if err != nil {
 		return err
@@ -152,10 +183,12 @@ func syncRepo(serverURL string, dedup bool, log io.Writer) error {
 
 	remote, err := getRemoteURL(repoRoot)
 	if err != nil {
+		rec.done("", "")
 		return nil // no origin → nothing to sync against
 	}
 	normalized, err := git.Normalize(remote)
 	if err != nil {
+		rec.done("", "")
 		return nil
 	}
 
@@ -164,6 +197,9 @@ func syncRepo(serverURL string, dedup bool, log io.Writer) error {
 		return err
 	}
 	if info == nil {
+		// Recorded, so an unregistered checkout costs one lookup per TTL rather
+		// than one per query.
+		rec.done("", "")
 		fmt.Fprintf(log, "sync: %s is not registered — REGISTER it first\n", normalized)
 		return nil
 	}
@@ -173,6 +209,7 @@ func syncRepo(serverURL string, dedup bool, log io.Writer) error {
 		return err
 	}
 	if base == nil {
+		rec.done("", "")
 		fmt.Fprintln(log, "sync: no ready base index yet — skipping")
 		return nil
 	}
@@ -183,18 +220,33 @@ func syncRepo(serverURL string, dedup bool, log io.Writer) error {
 	// moved past base_ref_sha is the server's business, not an overlay to push —
 	// skip it here (and record the skip so the watcher stops re-resolving it).
 	if toName == base.BaseRefName {
-		recordSync(log, repoRoot, base.IndexID, toName, toSHA)
+		rec.done(base.IndexID, "")
 		fmt.Fprintf(log,
 			"sync: on base branch %s — nothing to overlay (base freshness is server-side)\n",
 			toName)
 		return nil
 	}
-	if toSHA == base.BaseRefSHA {
-		recordSync(log, repoRoot, base.IndexID, toName, toSHA)
+
+	// The server reads every blob from its own clone, fetching the commit from
+	// origin: it cannot see a commit that was never pushed, and a SYNC naming one
+	// only costs it a failed fetch. Send the newest commit of HEAD's history that
+	// origin has; with none, there is nothing the server could apply.
+	sent, ok := fetchableTarget(repoRoot, toSHA)
+	if !ok {
+		rec.done(base.IndexID, "")
+		fmt.Fprintln(log, "sync: HEAD is not on origin and has no pushed ancestor on its "+
+			"upstream — push the branch to make it searchable")
+		return nil
+	}
+	if sent != toSHA {
+		fmt.Fprintf(log, "sync: HEAD has unpushed commits — syncing its pushed base %s\n", shortSHA(sent))
+	}
+	if sent == base.BaseRefSHA {
+		rec.done(base.IndexID, sent)
 		return nil // on the base commit; nothing to overlay
 	}
 
-	diff, err := git.ComputeDiff(repoRoot, base.BaseRefSHA, toSHA)
+	diff, err := git.ComputeDiff(repoRoot, base.BaseRefSHA, sent)
 	if err != nil {
 		return err
 	}
@@ -204,7 +256,7 @@ func syncRepo(serverURL string, dedup bool, log io.Writer) error {
 		"from_ref_name": base.BaseRefName,
 		"from_ref_sha":  base.BaseRefSHA,
 		"to_ref_name":   toName,
-		"to_ref_sha":    toSHA,
+		"to_ref_sha":    sent,
 		"mask_key_rev":  info.MaskKeyRev,
 		"diff_omitted":  diff.DiffOmitted,
 		"manifest_mode": diff.ManifestMode,
@@ -229,19 +281,43 @@ func syncRepo(serverURL string, dedup bool, log io.Writer) error {
 	}
 
 	status, jobID := parseSyncResult(payload)
-	recordSync(log, repoRoot, base.IndexID, toName, toSHA)
+	rec.done(base.IndexID, sent)
 	fmt.Fprintf(log, "sync: %s → %s (status=%s job=%s)\n", base.BaseRefName, toName, status, jobID)
 	return nil
 }
 
-// recordSync stamps the ref pair as handled so identical watcher wake-ups —
-// including those from other agent sessions sharing this working copy — return
-// before touching the network. Best-effort: a write failure only costs a
-// redundant SYNC next time.
-func recordSync(log io.Writer, repoRoot, indexID, toName, toSHA string) {
-	st := syncState{IndexID: indexID, ToRef: toName, ToSHA: toSHA, SyncedAt: time.Now()}
-	if err := writeSyncState(repoRoot, st); err != nil {
-		fmt.Fprintf(log, "sync: could not record sync state: %v\n", err)
+// fetchableTarget is the commit to SYNC for head: head itself when origin has it,
+// else its newest pushed ancestor on the upstream; ok=false when there is none.
+func fetchableTarget(repoRoot, head string) (string, bool) {
+	if git.OnRemote(repoRoot, "origin", head) {
+		return head, true
+	}
+	if pb := git.PushedBase(repoRoot, head); pb != "" && git.OnRemote(repoRoot, "origin", pb) {
+		return pb, true
+	}
+	return "", false
+}
+
+// syncRecorder stamps HEAD's ref pair with an attempt's outcome so identical
+// wake-ups — including those from other agent sessions sharing this working
+// copy — return before touching the network. Best-effort: a write failure only
+// costs a redundant SYNC next time.
+type syncRecorder struct {
+	log           io.Writer
+	root          string
+	toName, toSHA string
+}
+
+func (r syncRecorder) done(indexID, sent string) { r.write(syncDone, indexID, sent) }
+
+func (r syncRecorder) write(status, indexID, sent string) {
+	if sent == r.toSHA {
+		sent = ""
+	}
+	st := syncState{IndexID: indexID, ToRef: r.toName, ToSHA: r.toSHA, SyncedAt: time.Now(),
+		Status: status, SentSHA: sent}
+	if err := writeSyncState(r.root, st); err != nil {
+		fmt.Fprintf(r.log, "sync: could not record sync state: %v\n", err)
 	}
 }
 

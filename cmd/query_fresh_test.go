@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/codastre/cli/internal/git"
 	"github.com/codastre/cli/internal/mcpshim"
 )
 
@@ -88,6 +89,8 @@ func envelope(t *testing.T, repos map[string]searchedRefs) json.RawMessage {
 func TestSearchedLine(t *testing.T) {
 	root, shas := commitRepo(t, 4)
 	head := shas[3]
+	// HEAD is on origin (a remote-tracking ref is all OnRemote reads).
+	runGit(t, root, "update-ref", "refs/remotes/origin/main", head)
 	co := localCheckout{root: root, branch: "feat/x", head: head}
 	cases := []struct {
 		name string
@@ -173,6 +176,77 @@ func TestIndexLagVerdict(t *testing.T) {
 		f := c.lag.verdict()
 		if f.ok != c.wantOK || !f.warning || !strings.Contains(f.detail, c.want) {
 			t.Errorf("%s: got ok=%v warning=%v %q", c.name, f.ok, f.warning, f.detail)
+		}
+	}
+}
+
+func TestSearchedLine_FlagsAnUnpushedHead(t *testing.T) {
+	root, shas := commitRepo(t, 3)
+	runGit(t, root, "update-ref", "refs/remotes/origin/main", shas[1]) // HEAD (shas[2]) not pushed
+	co := localCheckout{root: root, branch: "feat/x", head: shas[2]}
+	got := searchedLine(envelope(t, map[string]searchedRefs{"r1": {BaseRef: "main", BaseSHA: shas[0]}}), co)
+	if !strings.Contains(got, "2 commits behind HEAD (HEAD is not pushed") {
+		t.Errorf("got %q, want the unpushed note", got)
+	}
+}
+
+func TestPushedBaseAndOnRemote(t *testing.T) {
+	root, shas := commitRepo(t, 3)
+	runGit(t, root, "update-ref", "refs/remotes/origin/main", shas[1])
+	// Upstream by config: there is no real remote to track.
+	runGit(t, root, "config", "remote.origin.url", "https://example.invalid/repo.git")
+	runGit(t, root, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	runGit(t, root, "config", "branch.main.remote", "origin")
+	runGit(t, root, "config", "branch.main.merge", "refs/heads/main")
+	if !git.OnRemote(root, "origin", shas[0]) || !git.OnRemote(root, "origin", shas[1]) {
+		t.Error("ancestors of origin/main must read as on origin")
+	}
+	if git.OnRemote(root, "origin", shas[2]) {
+		t.Error("an unpushed commit must not read as on origin")
+	}
+	if got := git.PushedBase(root, shas[2]); got != shas[1] {
+		t.Errorf("PushedBase = %q, want the upstream tip %q", got, shas[1])
+	}
+}
+
+func TestSyncIsRedundant_StatusWindows(t *testing.T) {
+	now := time.Now()
+	st := func(status string, age time.Duration) *syncState {
+		return &syncState{ToRef: "b", ToSHA: "s", SyncedAt: now.Add(-age), Status: status}
+	}
+	cases := []struct {
+		name string
+		st   *syncState
+		want bool
+	}{
+		{"done within TTL", st(syncDone, 10*time.Minute), true},
+		{"legacy (no status) within TTL", st("", 10*time.Minute), true},
+		{"done past TTL", st(syncDone, 16*time.Minute), false},
+		{"pending suppresses parallel callers", st(syncPending, 30*time.Second), true},
+		{"stale pending (crashed attempt) retries", st(syncPending, 2*time.Minute), false},
+		{"failed backs off", st(syncFailed, time.Minute), true},
+		{"failed retries after backoff", st(syncFailed, 3*time.Minute), false},
+	}
+	for _, c := range cases {
+		if got := syncIsRedundant(c.st, "b", "s", now); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestSyncCoversHead(t *testing.T) {
+	ok := &syncState{ToRef: "b", ToSHA: "h", Status: syncDone}
+	if !syncCoversHead(ok, "b", "h") {
+		t.Error("a done sync of HEAD covers it")
+	}
+	for name, st := range map[string]*syncState{
+		"pending":     {ToRef: "b", ToSHA: "h", Status: syncPending},
+		"failed":      {ToRef: "b", ToSHA: "h", Status: syncFailed},
+		"pushed base": {ToRef: "b", ToSHA: "h", Status: syncDone, SentSHA: "p"},
+		"other head":  {ToRef: "b", ToSHA: "x", Status: syncDone},
+	} {
+		if syncCoversHead(st, "b", "h") {
+			t.Errorf("%s must not count as synced at HEAD", name)
 		}
 	}
 }

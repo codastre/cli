@@ -98,8 +98,15 @@ func checkIndexLag(serverURL, apiKey, repoRoot string) finding {
 	if n, err := git.CountCommits(repoRoot, base.BaseRefSHA, head); err == nil {
 		lag.ahead = n
 	}
-	if st := readSyncState(repoRoot); st != nil && st.ToRef == branch && st.ToSHA == head {
+	if st := readSyncState(repoRoot); syncCoversHead(st, branch, head) {
 		lag.synced, lag.syncedAt = true, st.SyncedAt
 	}
 	return lag.verdict()
+}
+
+// syncCoversHead: the recorded attempt finished and sent HEAD itself — not one
+// in flight or failed, and not the pushed-base fallback for an unpushed HEAD.
+func syncCoversHead(st *syncState, branch, head string) bool {
+	return st != nil && st.ToRef == branch && st.ToSHA == head && st.SentSHA == "" &&
+		(st.Status == "" || st.Status == syncDone)
 }

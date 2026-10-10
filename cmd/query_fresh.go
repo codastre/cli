@@ -154,10 +154,17 @@ func lagPhrase(co localCheckout, sha string) string {
 	case n == 0:
 		// HEAD is an ancestor: the index is AHEAD of the working tree.
 		return "ahead of HEAD (results may show code you do not have)"
-	case n == 1:
-		return "1 commit behind HEAD"
 	default:
-		return fmt.Sprintf("%d commits behind HEAD", n)
+		behind := fmt.Sprintf("%d commits behind HEAD", n)
+		if n == 1 {
+			behind = "1 commit behind HEAD"
+		}
+		// The server can only index what it can fetch from origin; say so rather
+		// than let the agent wait for a sync that cannot catch up.
+		if !git.OnRemote(co.root, "origin", co.head) {
+			behind += " (HEAD is not pushed — the index cannot see local-only commits)"
+		}
+		return behind
 	}
 }
 
