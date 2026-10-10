@@ -44,7 +44,7 @@ func TestQueryToolArgs_StacksUsesCanonicalWireName(t *testing.T) {
 	resetQueryFilterFlags(t)
 	queryStacks = []string{"backend", "mobile"}
 
-	args := queryToolArgs("payment webhook", formatHuman, false)
+	args := queryToolArgs("payment webhook", formatHuman, false, "")
 
 	got, ok := args["stacks"].([]string)
 	if !ok {
@@ -63,7 +63,7 @@ func TestQueryToolArgs_PassesAliasesThroughVerbatim(t *testing.T) {
 	resetQueryFilterFlags(t)
 	queryStacks = []string{"android", "ios"}
 
-	args := queryToolArgs("push token refresh", formatHuman, false)
+	args := queryToolArgs("push token refresh", formatHuman, false, "")
 
 	// The server owns normalization. If the CLI expanded these itself it could
 	// disagree with a tenant that relabeled its catalog.
@@ -75,7 +75,7 @@ func TestQueryToolArgs_PassesAliasesThroughVerbatim(t *testing.T) {
 func TestQueryToolArgs_NoStackFlagSendsNoFilter(t *testing.T) {
 	resetQueryFilterFlags(t)
 
-	args := queryToolArgs("auth middleware", formatHuman, false)
+	args := queryToolArgs("auth middleware", formatHuman, false, "")
 
 	if _, present := args["stacks"]; present {
 		t.Fatal("sent a stacks key with no --stacks flag: an empty list is a filter")

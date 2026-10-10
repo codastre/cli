@@ -31,6 +31,17 @@ With no target flag:
     is tried, so a clone whose 'origin' is unregistered still resolves.
   • otherwise (no repo / no remotes) → search every repo you can see
 
+Branch freshness (when the target is the checkout you run in):
+  • the current branch is sent as the ref, so the search covers your branch's
+    overlay, not just the base; --ref names another, --base-only sends none.
+  • HEAD is synced first (the same sync the 'serve' watcher runs), waiting at
+    most $CODASTRE_EAGER_SYNC_BUDGET (default 2s, 0 = off); an already-synced
+    HEAD costs no request. On timeout the query runs and reports "syncing".
+  • the target line (and the --format agent header) names the commit that was
+    searched and how far it trails HEAD, e.g.
+      searched: base main @ 1aa1e6b · 3 commits behind HEAD
+    "freshness: fresh" alone only means the base index is built.
+
 Reading the output:
   • status "ok" with an empty result list means "searched, nothing matched" —
     that is a valid answer, not an error (exit 0).
@@ -90,6 +101,7 @@ var (
 	queryRepoURL         string
 	queryAll             bool
 	queryRef             string
+	queryBaseOnly        bool
 	queryTopK            int
 	queryLanguage        string
 	queryPathPrefix      string
@@ -115,7 +127,11 @@ func init() {
 	f.StringVar(&queryIndexID, "index-id", "", "Search a single index by id")
 	f.StringVar(&queryRepoURL, "repo-url", "", "Search a specific repo by URL")
 	f.BoolVar(&queryAll, "all", false, "Search across all visible repos")
-	f.StringVar(&queryRef, "ref", "", "Branch/ref to include its overlay (default: base only)")
+	f.StringVar(&queryRef, "ref", "",
+		"Branch/ref whose overlay to include (default: the current branch when "+
+			"the query targets this checkout; otherwise base only)")
+	f.BoolVar(&queryBaseOnly, "base-only", false,
+		"Search the base index only: send no ref and skip the eager sync")
 	// 6, not the tool default of 10 (docs/bugs/query-defaults-token-budget.md, C4).
 	// Measured on a lookup question, every correct answer came from ranks 1-3 and
 	// ranks 4-10 were 70% of the payload and 0% of the answers. 6 rather than 4
@@ -180,7 +196,7 @@ func corporaFlagConflicts(changed func(string) bool) (errs []string, warns []str
 	}
 	// Result filters with no CORPUS_SEARCH equivalent. They would have excluded
 	// evidence, so ignoring them changes the ranking.
-	for _, f := range []string{"ref", "path-prefix", "alert-ids", "error-codes", "symbol"} {
+	for _, f := range []string{"ref", "base-only", "path-prefix", "alert-ids", "error-codes", "symbol"} {
 		if changed(f) {
 			errs = append(errs, "--"+f)
 		}
@@ -200,15 +216,15 @@ func corporaFlagConflicts(changed func(string) bool) (errs []string, warns []str
 // unset filter must serialise to NO key at all, because an empty list on the
 // wire is a filter the server would apply. That is the back-compat contract for
 // every command that predates a flag.
-func queryToolArgs(text, format string, symbol bool) map[string]any {
+func queryToolArgs(text, format string, symbol bool, ref string) map[string]any {
 	toolArgs := map[string]any{"query_text": text, "top_k": queryTopK}
 	// Sent only when asked for, like every filter: an older server then sees the
 	// request it always saw.
 	if symbol {
 		toolArgs["match"] = mcpshim.MatchSymbol
 	}
-	if queryRef != "" {
-		toolArgs["ref"] = queryRef
+	if ref != "" {
+		toolArgs["ref"] = ref
 	}
 	if queryLanguage != "" {
 		toolArgs["language"] = queryLanguage
@@ -301,7 +317,14 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+warn)
 	}
 
-	toolArgs := queryToolArgs(text, format, symbol)
+	// Phase C: a query against its own checkout searches what the checkout
+	// holds — the branch's overlay, synced first — unless --base-only.
+	co, inCheckout := checkoutFor(tgt)
+	ref := queryRefFor(queryRef, queryBaseOnly, co, inCheckout)
+	if inCheckout && !queryBaseOnly && queryRef == "" {
+		eagerSync(queryServerURL, eagerSyncBudget(), cmd.ErrOrStderr())
+	}
+	toolArgs := queryToolArgs(text, format, symbol, ref)
 
 	// Server caps QUERY at 10s; allow margin for transport.
 	ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
@@ -324,7 +347,15 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.ErrOrStderr(),
 			"warning: this server does not support symbol mode — results are hybrid search")
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "target: %s\n", tgt.describe())
+	searched := ""
+	if inCheckout {
+		searched = searchedLine(payload, co)
+	}
+	if searched != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "target: %s · %s\n", tgt.describe(), searched)
+	} else {
+		fmt.Fprintf(cmd.ErrOrStderr(), "target: %s\n", tgt.describe())
+	}
 	var unmask func(pathToken string, maskKeyRev int) (string, bool)
 	if !queryNoUnmask {
 		unmask = resolveUnmask(cmd.ErrOrStderr(), tgt, queryRepoPath, queryServerURL, apiKey)
@@ -350,6 +381,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 			NoSnippets:      noSnippets,
 			SymbolRequested: symbol,
 			QueryText:       text,
+			Searched:        searched,
 			// Still passed: hydration writes real_path only where it could
 			// resolve one, and the renderer unmasks what is left over.
 			Unmask: unmask,

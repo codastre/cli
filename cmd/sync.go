@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -121,6 +122,13 @@ func pollSync(repoRoot string) error {
 // dedup is false for an explicit `codastre sync --once`: the user asked for a
 // sync, so they get one even if the refs have not moved.
 func doSync(dedup bool) error {
+	return syncRepo(syncServerURL, dedup, os.Stderr)
+}
+
+// syncRepo is doSync against an explicit server, logging to log. `codastre
+// query` calls it for its eager sync (search-effectiveness C) with its own
+// --server and a quiet log, so the watcher and the query share one SYNC path.
+func syncRepo(serverURL string, dedup bool, log io.Writer) error {
 	repoRoot, err := findGitRoot(".")
 	if err != nil {
 		return err
@@ -134,13 +142,12 @@ func doSync(dedup bool) error {
 		return nil
 	}
 
-	serverURL := syncServerURL
 	apiKey, warn, err := resolveAPIKey(serverURL, "")
 	if err != nil {
 		return err
 	}
 	if warn != "" {
-		fmt.Fprintln(os.Stderr, "warning: "+warn)
+		fmt.Fprintln(log, "warning: "+warn)
 	}
 
 	remote, err := getRemoteURL(repoRoot)
@@ -157,7 +164,7 @@ func doSync(dedup bool) error {
 		return err
 	}
 	if info == nil {
-		fmt.Fprintf(os.Stderr, "sync: %s is not registered — REGISTER it first\n", normalized)
+		fmt.Fprintf(log, "sync: %s is not registered — REGISTER it first\n", normalized)
 		return nil
 	}
 
@@ -166,7 +173,7 @@ func doSync(dedup bool) error {
 		return err
 	}
 	if base == nil {
-		fmt.Fprintln(os.Stderr, "sync: no ready base index yet — skipping")
+		fmt.Fprintln(log, "sync: no ready base index yet — skipping")
 		return nil
 	}
 
@@ -176,14 +183,14 @@ func doSync(dedup bool) error {
 	// moved past base_ref_sha is the server's business, not an overlay to push —
 	// skip it here (and record the skip so the watcher stops re-resolving it).
 	if toName == base.BaseRefName {
-		recordSync(repoRoot, base.IndexID, toName, toSHA)
-		fmt.Fprintf(os.Stderr,
+		recordSync(log, repoRoot, base.IndexID, toName, toSHA)
+		fmt.Fprintf(log,
 			"sync: on base branch %s — nothing to overlay (base freshness is server-side)\n",
 			toName)
 		return nil
 	}
 	if toSHA == base.BaseRefSHA {
-		recordSync(repoRoot, base.IndexID, toName, toSHA)
+		recordSync(log, repoRoot, base.IndexID, toName, toSHA)
 		return nil // on the base commit; nothing to overlay
 	}
 
@@ -222,8 +229,8 @@ func doSync(dedup bool) error {
 	}
 
 	status, jobID := parseSyncResult(payload)
-	recordSync(repoRoot, base.IndexID, toName, toSHA)
-	fmt.Fprintf(os.Stderr, "sync: %s → %s (status=%s job=%s)\n", base.BaseRefName, toName, status, jobID)
+	recordSync(log, repoRoot, base.IndexID, toName, toSHA)
+	fmt.Fprintf(log, "sync: %s → %s (status=%s job=%s)\n", base.BaseRefName, toName, status, jobID)
 	return nil
 }
 
@@ -231,10 +238,10 @@ func doSync(dedup bool) error {
 // including those from other agent sessions sharing this working copy — return
 // before touching the network. Best-effort: a write failure only costs a
 // redundant SYNC next time.
-func recordSync(repoRoot, indexID, toName, toSHA string) {
+func recordSync(log io.Writer, repoRoot, indexID, toName, toSHA string) {
 	st := syncState{IndexID: indexID, ToRef: toName, ToSHA: toSHA, SyncedAt: time.Now()}
 	if err := writeSyncState(repoRoot, st); err != nil {
-		fmt.Fprintf(os.Stderr, "sync: could not record sync state: %v\n", err)
+		fmt.Fprintf(log, "sync: could not record sync state: %v\n", err)
 	}
 }
 

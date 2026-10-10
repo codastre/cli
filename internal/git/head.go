@@ -3,6 +3,7 @@ package git
 import (
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -36,4 +37,16 @@ func revParse(repoPath, ref string) (string, error) {
 		return "", fmt.Errorf("git rev-parse %s: %w", ref, err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// CountCommits returns how many commits are reachable from to but not from from
+// (`git rev-list --count from..to`) — the commits an index built at from lacks.
+// Errors when either commit is absent locally, e.g. a base sha this clone never
+// fetched; callers treat that as "unknown", never as zero.
+func CountCommits(repoPath, from, to string) (int, error) {
+	out, err := exec.Command("git", "-C", repoPath, "rev-list", "--count", from+".."+to).Output()
+	if err != nil {
+		return 0, fmt.Errorf("git rev-list --count %s..%s: %w", from, to, err)
+	}
+	return strconv.Atoi(strings.TrimSpace(string(out)))
 }

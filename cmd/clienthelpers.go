@@ -80,6 +80,10 @@ type target struct {
 	repoURL   string // a specific repo by URL
 	federated bool   // all visible repos
 
+	// auto marks a target resolved from the CWD checkout's remotes, so callers
+	// can treat that checkout as the thing searched (search-effectiveness C).
+	auto bool
+
 	// fallbacks holds additional repo_url candidates (auto mode only). When the
 	// server reports REPO_NOT_INDEXED for repoURL, callWithRepoFallback retries
 	// these in order before surfacing the error.
@@ -147,7 +151,7 @@ func resolveTarget(indexID, repoURL string, all bool) (target, error) {
 		// primary; the rest are retried only if the primary is not indexed. An
 		// explicit --repo-url never gets this fallback — it targets exactly one repo.
 		if cands := autoTargets(); len(cands) > 0 {
-			return target{repoURL: cands[0], fallbacks: cands[1:]}, nil
+			return target{repoURL: cands[0], fallbacks: cands[1:], auto: true}, nil
 		}
 		return target{federated: true}, nil
 	}
@@ -176,7 +180,7 @@ func callWithRepoFallback(
 		}
 		var te *mcpclient.ToolError
 		if errors.As(err, &te) && te.Code == "REPO_NOT_INDEXED" && len(remaining) > 0 {
-			cur = target{repoURL: remaining[0]}
+			cur = target{repoURL: remaining[0], auto: tgt.auto}
 			remaining = remaining[1:]
 			continue
 		}

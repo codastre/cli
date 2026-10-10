@@ -203,6 +203,11 @@ type RenderOptions struct {
 	// leaves both unset and renders from the envelope's echo alone.
 	SymbolRequested bool
 	QueryText       string
+	// Searched is `codastre query`'s "searched: base main @ sha · N commits
+	// behind HEAD" line (search-effectiveness C), computed against the local
+	// checkout the proxy does not have. Printed under the header when set;
+	// empty means unknown, and the header's freshness is all there is.
+	Searched string
 }
 
 // RenderQueryText renders a QUERY payload as agent text for callers outside this
@@ -271,6 +276,10 @@ func writeHeader(b *strings.Builder, env renderEnvelope, opts RenderOptions) {
 	tag, notes := matchLines(env.MatchUsed, env.SymbolFound, opts.SymbolRequested, opts.QueryText)
 	fmt.Fprintf(b, "codastre · %d hits · %d repo(s) searched · %s%s · %s\n",
 		len(env.Results), env.searchedCount(), env.Freshness, tag, mode)
+	if opts.Searched != "" {
+		b.WriteString(opts.Searched)
+		b.WriteByte('\n')
+	}
 	for _, n := range notes {
 		b.WriteString(n)
 		b.WriteByte('\n')

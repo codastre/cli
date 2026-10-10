@@ -9,10 +9,10 @@ import (
 
 func TestQueryToolArgs_SymbolSendsMatchOnlyWhenAsked(t *testing.T) {
 	resetQueryFilterFlags(t)
-	if _, sent := queryToolArgs("retry", formatHuman, false)["match"]; sent {
+	if _, sent := queryToolArgs("retry", formatHuman, false, "")["match"]; sent {
 		t.Fatal("hybrid request must not send `match`: an older server sees the old request")
 	}
-	args := queryToolArgs("isSearchStage", formatHuman, true)
+	args := queryToolArgs("isSearchStage", formatHuman, true, "")
 	if args["match"] != "symbol" || args["query_text"] != "isSearchStage" {
 		t.Fatalf("args = %#v", args)
 	}

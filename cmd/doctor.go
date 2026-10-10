@@ -201,8 +201,9 @@ func runDoctor(cmd *cobra.Command, _ []string) {
 		findings = append(findings, finding{label: "otel content logging", ok: true, detail: "off"})
 	}
 
-	// 7. Last sync result (advisory).
-	findings = append(findings, finding{label: "last sync", ok: true, detail: "no sync recorded yet"})
+	// 7. Index lag (advisory, search-effectiveness C): how far HEAD is past the
+	// indexed base, and whether an overlay covers it.
+	findings = append(findings, checkIndexLag(doctorServerURL, apiKey, repoRoot))
 
 	// Render and exit.
 	hasError, hasWarning := false, false
