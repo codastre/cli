@@ -320,10 +320,18 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	// Phase C: a query against its own checkout searches what the checkout
 	// holds — the branch's overlay, synced first — unless --base-only.
 	co, inCheckout := checkoutFor(tgt)
-	ref := queryRefFor(queryRef, queryBaseOnly, co, inCheckout)
 	if inCheckout && !queryBaseOnly && queryRef == "" {
 		eagerSync(queryServerURL, eagerSyncBudget(), cmd.ErrOrStderr())
 	}
+	// Read after the eager sync, which is what learns the server has branch sync
+	// off: then no overlay will ever exist, so naming the branch only buys a
+	// permanent "syncing" — search the base, and say so.
+	baseOnly := queryBaseOnly
+	if queryRef == "" && !queryBaseOnly && branchSyncDisabled(co, inCheckout) {
+		baseOnly = true
+		noteBaseOnly(cmd.ErrOrStderr())
+	}
+	ref := queryRefFor(queryRef, baseOnly, co, inCheckout)
 	toolArgs := queryToolArgs(text, format, symbol, ref)
 
 	// Server caps QUERY at 10s; allow margin for transport.

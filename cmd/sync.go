@@ -144,7 +144,8 @@ func syncRepo(serverURL string, dedup bool, log io.Writer) error {
 		return err
 	}
 	prev := readSyncState(repoRoot)
-	if dedup && syncIsRedundant(prev, toName, toSHA, time.Now()) {
+	if dedup && (syncIsRedundant(prev, toName, toSHA, time.Now()) ||
+		syncDisabledRecently(prev, time.Now())) {
 		return nil
 	}
 	rec := syncRecorder{log: log, root: repoRoot, toName: toName, toSHA: toSHA}
@@ -201,6 +202,9 @@ func syncAttempt(serverURL string, log io.Writer, rec syncRecorder) error {
 		// than one per query.
 		rec.done("", "")
 		fmt.Fprintf(log, "sync: %s is not registered — REGISTER it first\n", normalized)
+		return nil
+	}
+	if !syncAllowedByServer(serverURL, apiKey, info.RepoID, rec) {
 		return nil
 	}
 
@@ -281,6 +285,12 @@ func syncAttempt(serverURL string, log io.Writer, rec syncRecorder) error {
 	}
 
 	status, jobID := parseSyncResult(payload)
+	if status == syncDisabledStatus {
+		// Turned off between the capability check and now (or an older server
+		// answering for a newer policy): same outcome, learned one request later.
+		recordSyncDisabled(rec, base.IndexID)
+		return nil
+	}
 	rec.done(base.IndexID, sent)
 	fmt.Fprintf(log, "sync: %s → %s (status=%s job=%s)\n", base.BaseRefName, toName, status, jobID)
 	return nil

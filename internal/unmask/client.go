@@ -121,6 +121,27 @@ func ResolveBaseIndex(serverURL, apiKey, repoID string) (*IndexInfo, error) {
 	return fallback, nil
 }
 
+// SyncEnabled reports whether the server lets this caller SYNC branches of repoID
+// (the operator's branch-sync policy). It fails open — a server predating
+// /v1/me/capabilities, or any error, reads as enabled — because the server gates
+// SYNC itself; this only spares the client a diff and a request it would waste.
+func SyncEnabled(serverURL, apiKey, repoID string) bool {
+	u := strings.TrimRight(serverURL, "/") + "/v1/me/capabilities?repo_id=" + url.QueryEscape(repoID)
+	body, status, err := getRaw(u, apiKey)
+	if err != nil || status != http.StatusOK {
+		return true
+	}
+	var resp struct {
+		Sync *struct {
+			Enabled bool `json:"enabled"`
+		} `json:"sync"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil || resp.Sync == nil {
+		return true
+	}
+	return resp.Sync.Enabled
+}
+
 type maskingKeyResponse struct {
 	Revs map[string]string `json:"revs"` // rev-string → hex key
 }

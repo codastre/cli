@@ -57,6 +57,11 @@ const (
 	// syncFailed: the last attempt errored. Back off instead of retrying (and,
 	// for a query, waiting out the eager-sync budget) on every call.
 	syncFailed = "failed"
+	// syncDisabled: the server has branch sync turned off for this repo/caller
+	// (sync_capability.go). Unlike the others it suppresses every ref, not just
+	// the recorded pair, for syncStateTTL — then the next attempt asks again, so
+	// re-enabling on the server is picked up within one window.
+	syncDisabled = "disabled"
 )
 
 const (

@@ -22,6 +22,7 @@ type indexLag struct {
 	baseRef, baseSHA string
 	ahead            int  // commits on HEAD the base lacks; -1 = unknown
 	synced           bool // the recorded sync covers this exact branch + HEAD
+	syncOff          bool // the server has branch sync turned off for this repo
 	syncedAt         time.Time
 }
 
@@ -38,6 +39,11 @@ func (l indexLag) verdict() finding {
 			f.ok = false
 			f.detail += " — waiting on the server's base roll-forward"
 		}
+	case l.syncOff:
+		// No overlay will be built, so "run sync" would be wrong advice. Report
+		// it, never warn: it is the operator's choice, not a broken checkout.
+		f.detail = fmt.Sprintf("branch sync is disabled on this server; searches use %s, %s",
+			base, aheadPhrase(l.ahead))
 	case l.synced:
 		f.detail = fmt.Sprintf("overlay for %s synced at HEAD %s (%s ago)",
 			l.branch, shortSHA(l.head), time.Since(l.syncedAt).Round(time.Minute))
@@ -98,6 +104,7 @@ func checkIndexLag(serverURL, apiKey, repoRoot string) finding {
 	if n, err := git.CountCommits(repoRoot, base.BaseRefSHA, head); err == nil {
 		lag.ahead = n
 	}
+	lag.syncOff = branch != base.BaseRefName && !unmask.SyncEnabled(serverURL, apiKey, info.RepoID)
 	if st := readSyncState(repoRoot); syncCoversHead(st, branch, head) {
 		lag.synced, lag.syncedAt = true, st.SyncedAt
 	}
