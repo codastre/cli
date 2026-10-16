@@ -164,13 +164,13 @@ func TestIndexLagVerdict(t *testing.T) {
 		{"unsynced, small lag", indexLag{branch: "feat/x", head: "h", baseRef: "main",
 			baseSHA: "1111111", ahead: 3}, true, "3 commit(s) behind HEAD"},
 		{"unsynced, far ahead", indexLag{branch: "feat/x", head: "h", baseRef: "main",
-			baseSHA: "1111111", ahead: 21}, false, "codastre sync --once"},
+			baseSHA: "1111111", ahead: 11}, false, "codastre sync --once"},
 		{"unsynced, unknown", indexLag{branch: "feat/x", head: "h", baseRef: "main",
 			baseSHA: "1111111", ahead: -1}, false, "lag unknown"},
 		{"base branch within ceiling", indexLag{branch: "main", head: "h", baseRef: "main",
-			baseSHA: "1111111", ahead: 20}, true, "on main"},
+			baseSHA: "1111111", ahead: 10}, true, "on main"},
 		{"base branch past ceiling", indexLag{branch: "main", head: "h", baseRef: "main",
-			baseSHA: "1111111", ahead: 21}, false, "base roll-forward"},
+			baseSHA: "1111111", ahead: 11}, false, "base roll-forward"},
 	}
 	for _, c := range cases {
 		f := c.lag.verdict()

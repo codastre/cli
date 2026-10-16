@@ -10,10 +10,10 @@ import (
 
 // doctorLagWarnCommits is how far HEAD may run ahead of the indexed base, with
 // no overlay synced, before doctor warns. It mirrors the server's roll-forward
-// commit ceiling (search-effectiveness B, CODASTRE_ROLLFORWARD_MAX_COMMITS = 20):
+// commit ceiling (search-effectiveness B, CODASTRE_ROLLFORWARD_MAX_COMMITS = 10):
 // past it, a base-only answer is missing more history than the base itself is
 // allowed to trail its own branch.
-const doctorLagWarnCommits = 20
+const doctorLagWarnCommits = 10
 
 // indexLag is what the "index lag" check measured, kept apart from the network
 // lookups so the verdict is testable against a real git repo alone.
