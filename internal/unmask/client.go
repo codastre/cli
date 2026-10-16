@@ -99,7 +99,9 @@ var defaultBranchNames = map[string]bool{
 // base_ref is a conventional default branch (main/master/trunk). Returns
 // (nil, nil) when the repo has no ready base index yet.
 func ResolveBaseIndex(serverURL, apiKey, repoID string) (*IndexInfo, error) {
-	u := strings.TrimRight(serverURL, "/") + "/v1/repos/" + url.PathEscape(repoID) + "/indexes"
+	// health=false: the per-index Qdrant counts are dashboard data, and this runs
+	// on every SYNC. Servers predating the flag ignore it and still answer.
+	u := strings.TrimRight(serverURL, "/") + "/v1/repos/" + url.PathEscape(repoID) + "/indexes?health=false"
 	indexes, err := getJSON[[]IndexInfo](u, apiKey)
 	if err != nil {
 		return nil, err

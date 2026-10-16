@@ -83,6 +83,9 @@ func TestFetchMaskingKeysDecodesHex(t *testing.T) {
 
 func TestResolveBaseIndexPrefersDefaultBranch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("health") != "false" {
+			t.Errorf("want health=false (skip per-index Qdrant counts), got %q", r.URL.RawQuery)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode([]IndexInfo{
 			{IndexID: "feat", BaseRefName: "feature-x", BaseRefSHA: "f1", Status: "ready"},
